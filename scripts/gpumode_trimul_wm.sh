@@ -3,8 +3,10 @@
 # Environment variables (common):
 # - KSEARCH_ROOT: path to k-search repo (default: /mnt/cluster_storage/k-search)
 # - MODEL_NAME: LLM model name (required unless passed via env)
-# - LLM_API_KEY or API_KEY: OpenAI-compatible API key (required)
+# - LLM_API_KEY or API_KEY: OpenAI-compatible API key (required for LLM_PROVIDER=openai)
 # - BASE_URL: OpenAI-compatible base url (optional)
+# - LLM_PROVIDER: openai|claude-agent (default: openai)
+# - ANTHROPIC_API_KEY: Claude Agent SDK key when LLM_PROVIDER=claude-agent
 #
 # Environment variables (task/generation):
 # - LANGUAGE: triton|python|cuda (default: triton)
@@ -33,6 +35,7 @@ KSEARCH_ROOT="${KSEARCH_ROOT:-}"
 # BASE_URL="${BASE_URL:-https://generativelanguage.googleapis.com/v1beta/}"
 # API_KEY="${API_KEY:-${LLM_API_KEY:-}}"
 MODEL_NAME="${MODEL_NAME:-gpt-5.2}"
+LLM_PROVIDER="${LLM_PROVIDER:-openai}"
 API_KEY="${API_KEY:-${LLM_API_KEY:-}}"
 BASE_URL="${BASE_URL:-https://us.api.openai.com/v1}"
 
@@ -58,12 +61,13 @@ if [[ -z "${MODEL_NAME}" ]]; then
   echo "ERROR: MODEL_NAME is required" >&2
   exit 2
 fi
-if [[ -z "${API_KEY}" ]]; then
-  echo "ERROR: API key is required (set LLM_API_KEY or API_KEY)" >&2
+if [[ "${LLM_PROVIDER}" == "openai" && -z "${API_KEY}" ]]; then
+  echo "ERROR: API key is required for LLM_PROVIDER=openai (set LLM_API_KEY or API_KEY)" >&2
   exit 2
 fi
 
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
+export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
 
 CONT_ARGS=()
 if [[ -n "${CONTINUE_FROM_SOLUTION}" ]]; then
@@ -78,6 +82,7 @@ fi
 sudo -E env "PATH=$PATH" python3 -u "${KSEARCH_ROOT}/generate_kernels_and_eval.py" \
   --task-source gpumode \
   --model-name "${MODEL_NAME}" \
+  --llm-provider "${LLM_PROVIDER}" \
   --api-key "${API_KEY}" \
   --base-url "${BASE_URL}" \
   --language "${LANGUAGE}" \
@@ -92,5 +97,3 @@ sudo -E env "PATH=$PATH" python3 -u "${KSEARCH_ROOT}/generate_kernels_and_eval.p
   --wandb \
   --run-name "${RUN_NAME}" \
   --wandb-project "${WANDB_PROJECT}"
-
-

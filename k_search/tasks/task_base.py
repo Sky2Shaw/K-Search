@@ -167,6 +167,7 @@ class SupportedLanguages(str, Enum):
     PYTHON = "python"
     TRITON = "triton"
     CUDA = "cuda"
+    ASCENDC = "ascendc"
     CPP = "cpp"
     MLX = "mlx"
 
@@ -282,6 +283,19 @@ def code_from_solution(language: str, solution: Solution) -> tuple[Any, Any]:
         current_raw_code = "\n\n".join(parts) if parts else ""
         return code_dict, current_raw_code
 
+    if lang == "ascendc":
+        code_dict = {sf.path: sf.content for sf in (solution.sources or [])}
+        try:
+            from k_search.tasks.ascendc_task import format_ascendc_project_files
+
+            current_raw_code = format_ascendc_project_files(code_dict)
+        except Exception:
+            parts = []
+            for path, content in code_dict.items():
+                parts.append(f'<file path="{path}">\n{content}\n</file>')
+            current_raw_code = "<ascendc_project>\n" + "\n\n".join(parts) + "\n</ascendc_project>"
+        return code_dict, current_raw_code
+
     entry_src = solution.get_entry_source()
     content = entry_src.content if entry_src else ""
     return content, content
@@ -379,6 +393,7 @@ def solution_from_json_dict(d: dict[str, Any]) -> Solution:
         "python": SupportedLanguages.PYTHON,
         "triton": SupportedLanguages.TRITON,
         "cuda": SupportedLanguages.CUDA,
+        "ascendc": SupportedLanguages.ASCENDC,
         "cpp": SupportedLanguages.CPP,
         "mlx": SupportedLanguages.MLX,
     }
@@ -404,5 +419,4 @@ def solution_from_json_dict(d: dict[str, Any]) -> Solution:
         ),
         sources=sources,
     )
-
 

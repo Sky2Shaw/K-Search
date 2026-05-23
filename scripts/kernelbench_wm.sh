@@ -3,8 +3,10 @@
 # Environment variables (common):
 # - KSEARCH_ROOT: path to k-search repo (default: repo root)
 # - MODEL_NAME: LLM model name (default: gpt-5.2)
-# - LLM_API_KEY or API_KEY: OpenAI-compatible API key (required)
+# - LLM_API_KEY or API_KEY: OpenAI-compatible API key (required for LLM_PROVIDER=openai)
 # - BASE_URL: OpenAI-compatible base url (optional)
+# - LLM_PROVIDER: openai|claude-agent (default: openai)
+# - ANTHROPIC_API_KEY: Claude Agent SDK key when LLM_PROVIDER=claude-agent
 #
 # Environment variables (task/generation):
 # - LANGUAGE: triton|cuda (default: triton)
@@ -33,6 +35,7 @@ KSEARCH_ROOT="${KSEARCH_ROOT:-.}"
 
 # Model configuration
 MODEL_NAME="${MODEL_NAME:-gpt-5.2}"
+LLM_PROVIDER="${LLM_PROVIDER:-openai}"
 API_KEY="${API_KEY:-${LLM_API_KEY:-}}"
 BASE_URL="${BASE_URL:-https://api.openai.com/v1}"
 
@@ -65,12 +68,13 @@ if [[ -z "${MODEL_NAME}" ]]; then
   echo "ERROR: MODEL_NAME is required" >&2
   exit 2
 fi
-if [[ -z "${API_KEY}" ]]; then
-  echo "ERROR: API key is required (set LLM_API_KEY or API_KEY)" >&2
+if [[ "${LLM_PROVIDER}" == "openai" && -z "${API_KEY}" ]]; then
+  echo "ERROR: API key is required for LLM_PROVIDER=openai (set LLM_API_KEY or API_KEY)" >&2
   exit 2
 fi
 
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
+export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
 
 # Build continuation arguments
 CONT_ARGS=()
@@ -94,6 +98,7 @@ echo "=========================================="
 echo "KernelBench K-Search Launcher"
 echo "=========================================="
 echo "Model: ${MODEL_NAME}"
+echo "LLM Provider: ${LLM_PROVIDER}"
 echo "KernelBench Level: ${LEVEL}, Problem ID: ${PROBLEM_ID}"
 echo "Eval Mode: ${EVAL_MODE}"
 echo "GPU: ${TARGET_GPU}"
@@ -107,6 +112,7 @@ echo "=========================================="
 env "PYTHONPATH=$KSEARCH_ROOT" python -u "${KSEARCH_ROOT}/generate_kernels_and_eval.py" \
   --task-source kernelbench \
   --model-name "${MODEL_NAME}" \
+  --llm-provider "${LLM_PROVIDER}" \
   --api-key "${API_KEY}" \
   --base-url "${BASE_URL}" \
   --language "${LANGUAGE}" \

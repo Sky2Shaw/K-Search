@@ -85,6 +85,28 @@ Rules:
 Generate the updated implementation:"""
 
 
+ASCENDC_ACTION_PROMPT = """You are implementing a SPECIFIC NEXT ACTION on top of a known-good AscendC baseline for {target_gpu}.
+
+Original Specification:
+{definition}
+
+Known-Good Base Implementation (start from this; do not include any other previous code):
+{base_code}
+
+Chosen Next Action (apply this action):
+{action_text}
+
+Rules:
+- Implement ONLY the chosen action; keep everything else as close as possible to the base implementation.
+- Preserve operator semantics, host tiling contract, public entry points, and correctness harness behavior.
+- Treat Host tiling, TilingData, blockDim, workspace, TPipe/TQue/TBuf, DataCopy/DataCopyPad, UB/L1/L0, AIC/AIV, Matmul API, tail handling, and alignment as first-class performance surfaces.
+- Return only the full updated AscendC multi-file container (no explanations, no markdown).
+
+{code_format}
+
+Generate the updated implementation:"""
+
+
 TRITON_DEBUG_PROMPT = """You are in a debug-and-improve loop for a Triton kernel on {target_gpu}.
 The current implementation may be buggy OR already correct-but-slower-than-desired.
 
@@ -196,6 +218,41 @@ Rules:
 Generate the corrected implementation:"""
 
 
+ASCENDC_DEBUG_PROMPT = """You are in a debug-and-improve loop for an AscendC operator on {target_gpu}.
+The current implementation may be buggy OR already correct-but-slower-than-desired.
+
+Original Specification:
+{definition}
+
+Known-Good Base Implementation (reference):
+{base_code}
+
+Current Implementation (fix or improve THIS code; keep it aligned with the base and the chosen action):
+{buggy_code}
+
+Performance Summary:
+{perf_summary}
+
+Failure Logs:
+{trace_logs}
+
+Chosen Next Action (still targeting; do not expand scope):
+{action_text}
+
+Debug-and-improve round: {debug_round}/{max_rounds}
+
+Rules:
+- If the current implementation FAILED: fix compile, CANN/AscendC runtime, or correctness issues FIRST.
+- If the current implementation PASSED: improve measured latency while preserving correctness.
+- Keep changes minimal; do not introduce unrelated rewrites.
+- Keep the implementation aligned with the base and the chosen action intent.
+- Return only the full corrected AscendC multi-file container (no explanations, no markdown).
+
+{code_format}
+
+Generate the corrected implementation:"""
+
+
 TRITON_IMPROVE_PROMPT = """You are improving a Triton kernel on {target_gpu}.
 The current implementation may be correct-but-slower-than-desired, or it may have regressed.
 
@@ -294,6 +351,37 @@ Rules:
 
 Generate the improved implementation:"""
 
+
+ASCENDC_IMPROVE_PROMPT = """You are improving an AscendC operator on {target_gpu}.
+The current implementation may be correct-but-slower-than-desired, or it may have regressed.
+
+Original Specification:
+{definition}
+
+Cycle-Best Base Implementation (reference):
+{base_code}
+
+Current Implementation (improve THIS code; keep it aligned with the base):
+{current_code}
+
+Performance Summary:
+{perf_summary}
+
+Recent Logs (only if FAILED):
+{trace_logs}
+
+Improve round: {debug_round}/{max_rounds}
+
+Rules:
+- If the current implementation FAILED: fix compile/runtime/correctness issues FIRST.
+- If the current implementation PASSED: improve measured latency while preserving correctness.
+- Keep changes minimal; do not introduce unrelated rewrites.
+- Return only the full corrected AscendC multi-file container (no explanations, no markdown).
+
+{code_format}
+
+Generate the improved implementation:"""
+
 def get_generate_code_from_action_prompt_from_text(
     language: str,
     *,
@@ -332,6 +420,14 @@ def get_generate_code_from_action_prompt_from_text(
             target_gpu=target_gpu,
             code_format=str(code_format or "").strip(),
             hints=CUDA_OPTIMIZATION_HINTS,
+        )
+    if lang == "ascendc":
+        return ASCENDC_ACTION_PROMPT.format(
+            definition=str(definition_text or "").strip(),
+            base_code=base_code,
+            action_text=action_text,
+            target_gpu=target_gpu,
+            code_format=str(code_format or "").strip(),
         )
     raise ValueError(f"Unsupported language for action prompt: {language}")
 
@@ -383,6 +479,17 @@ def get_generate_code_from_spec_with_action_prompt_from_text(
                 definition=str(definition_text or "").strip(),
                 base_code="(no base code; start from spec)",
                 action_text=action_text,
+                code_format=str(code_format or "").strip(),
+            )
+        )
+    if lang == "ascendc":
+        return (
+            "You are implementing a SPECIFIC NEXT ACTION starting from the specification.\n\n"
+            + ASCENDC_ACTION_PROMPT.format(
+                definition=str(definition_text or "").strip(),
+                base_code="(no base code; start from spec)",
+                action_text=action_text,
+                target_gpu=target_gpu,
                 code_format=str(code_format or "").strip(),
             )
         )
@@ -485,6 +592,19 @@ def get_debug_generated_code_prompt_from_text(
             max_rounds=mr,
             code_format=str(code_format or "").strip(),
         )
+    if lang == "ascendc":
+        return ASCENDC_DEBUG_PROMPT.format(
+            definition=str(definition_text or "").strip(),
+            base_code=base_code,
+            buggy_code=buggy_code,
+            perf_summary=str(perf_summary or "").strip() or "(none)",
+            trace_logs=str(trace_logs or "").strip() or "(no logs)",
+            action_text=action_text,
+            debug_round=dr,
+            max_rounds=mr,
+            target_gpu=target_gpu,
+            code_format=str(code_format or "").strip(),
+        )
     raise ValueError(f"Unsupported language for debug prompt: {language}")
 
 
@@ -578,6 +698,16 @@ def get_improve_generated_code_prompt_from_text(
             max_rounds=mr,
             code_format=str(code_format or "").strip(),
         )
+    if lang == "ascendc":
+        return ASCENDC_IMPROVE_PROMPT.format(
+            definition=str(definition_text or "").strip(),
+            base_code=base_code,
+            current_code=current_code,
+            perf_summary=str(perf_summary or "").strip() or "(none)",
+            trace_logs=str(trace_logs or "").strip() or "(no logs)",
+            debug_round=dr,
+            max_rounds=mr,
+            target_gpu=target_gpu,
+            code_format=str(code_format or "").strip(),
+        )
     raise ValueError(f"Unsupported language for improve prompt: {language}")
-
-

@@ -3,7 +3,8 @@ KSEARCH_ROOT="${KSEARCH_ROOT:-}"
 DATASET_ROOT="${DATASET_ROOT:-}"
 
 MODEL_NAME="${MODEL_NAME:-gemini-3-pro-preview}"
-API_KEY="${API_KEY:-}"
+LLM_PROVIDER="${LLM_PROVIDER:-openai}"
+API_KEY="${API_KEY:-${LLM_API_KEY:-}}"
 BASE_URL="${BASE_URL:-https://generativelanguage.googleapis.com/v1beta/}"
 
 DEFINITION="${DEFINITION:-mla_paged_decode_h16_ckv512_kpe64_ps1}"
@@ -22,12 +23,20 @@ WANDB_PROJECT="${WANDB_PROJECT:-test}"
 RUN_NAME="${RUN_NAME:-${MODEL_NAME}-${LANGUAGE}-wm-${DEFINITION}-seed-opt${MAX_OPT_ROUNDS}}"
 
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
+export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
+
+if [[ "${LLM_PROVIDER}" == "openai" && -z "${API_KEY}" ]]; then
+  echo "ERROR: API key is required for LLM_PROVIDER=openai (set LLM_API_KEY or API_KEY)" >&2
+  exit 2
+fi
+
 sudo -E env "PATH=$PATH" python3 -u "${KSEARCH_ROOT}/generate_kernels_and_eval.py" \
   --local "${DATASET_ROOT}" \
   --task-source flashinfer \
   --task-path "${DATASET_ROOT}" \
   --definition "${DEFINITION}" \
   --model-name "${MODEL_NAME}" \
+  --llm-provider "${LLM_PROVIDER}" \
   --api-key "${API_KEY}" \
   --base-url "${BASE_URL}" \
   --language "${LANGUAGE}" \
@@ -50,6 +59,4 @@ sudo -E env "PATH=$PATH" python3 -u "${KSEARCH_ROOT}/generate_kernels_and_eval.p
     d0da33e2-2d94-42b5-be8a-09111f9f2649 \
     e417264f-195d-4204-89fa-3ebdb539f1cf \
     939f995a-1ab2-4d19-8d94-50f07e73542d
-
-
 

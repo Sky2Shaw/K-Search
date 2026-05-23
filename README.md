@@ -29,13 +29,13 @@
   - [**GPUMode**](https://www.gpumode.com/home) — Competition tasks (e.g., TriMul) with leaderboard evaluation
   - [**KernelBench**](https://github.com/ScalingIntelligence/KernelBench) — PyTorch kernel optimization with 4 difficulty levels and 200+ problems
   - **MLX (Apple Silicon)** — A local MLX task backend with latency, unified memory pressure, and Apple-specific throughput proxies
+  - **AscendC** — A command-driven backend for AscendC multi-file operator projects
 
 - 📊 **W&B Integration** — Full Weights & Biases logging with per-round score tracking, generated code artifacts, and world model snapshots.
 
-- 🔌 **Multi-Model Support** — Works with any OpenAI-compatible API endpoint:
-  - OpenAI: `gpt-5.2`, `o3`
-  - Google: `gemini-3-pro-preview` (via compatible endpoint)
-  - Any model exposing a chat completions API
+- 🔌 **Multi-Model Support** — Supports both OpenAI-compatible APIs and Claude Agent SDK:
+  - OpenAI-compatible: `gpt-5.2`, `o3`, Gemini-compatible endpoints, or any chat-completions-compatible API
+  - Claude Agent SDK: use `--llm-provider claude-agent` with Claude SDK authentication
 
 - 💾 **Solution Persistence** — All generated solutions, evaluation reports, and world model snapshots are persisted to disk for resumption and analysis.
 
@@ -55,6 +55,7 @@ k_search/
 │   ├── flashinfer_bench_task.py        # FlashInfer-Bench task adapter
 │   ├── gpu_mode_task.py                # GPUMode TriMul task adapter
 │   ├── kernelbench_task.py             # KernelBench task adapter
+│   ├── ascendc_task.py                 # AscendC command-driven task adapter
 │   ├── flashinfer_bench/               # FlashInfer-specific prompts
 │   ├── gpu_mode/                       # GPUMode evaluator, spec, utilities
 │   │   ├── evaluator.py
@@ -72,7 +73,7 @@ k_search/
 ### Prerequisites
 
 - NVIDIA GPU (H100/B200 recommended)
-- An API key for an OpenAI-compatible LLM provider
+- Either an API key for an OpenAI-compatible LLM provider, or Claude Agent SDK authentication via `ANTHROPIC_API_KEY`
 
 ### Installation
 
@@ -194,15 +195,38 @@ Then run the MLX Mamba selective scan forward task:
 bash scripts/mlx_mamba_wm.sh
 ```
 
+### AscendC
+
+The AscendC backend expects an existing operator project or task directory and delegates environment-specific work to shell commands that run inside each generated candidate project root:
+
+```bash
+python generate_kernels_and_eval.py \
+  --task-source ascendc \
+  --task-path /path/to/ascendc/op_project \
+  --definition vec_add \
+  --model-name gpt-5.2 \
+  --language ascendc \
+  --target-gpu ascend_910b \
+  --ascendc-build-cmd "./scripts/build.sh" \
+  --ascendc-test-cmd "./scripts/test_correctness.sh" \
+  --ascendc-bench-cmd "./scripts/bench.sh" \
+  --ascendc-reference-latency-ms 0.25 \
+  --world-model \
+  --max-opt-rounds 20
+```
+
+`--ascendc-bench-cmd` must print a parseable latency such as `latency_ms=0.123` or JSON like `{"latency_ms": 0.123}`. If `--ascendc-reference-latency-ms` is provided, K-Search scores candidates by `reference_latency_ms / latency_ms`; otherwise it scores by inverse latency.
+
 ## CLI Reference
 
 | Argument | Description | Default |
 |----------|-------------|---------|
-| `--task-source` | Task backend (`flashinfer`, `gpumode`, `kernelbench`, or `mlx`) | `flashinfer` |
+| `--task-source` | Task backend (`flashinfer`, `gpumode`, `kernelbench`, `mlx`, or `ascendc`) | `flashinfer` |
 | `--definition` | Target kernel definition name | — |
 | `--model-name` | LLM model identifier | *required* |
+| `--llm-provider` | LLM backend (`openai` or `claude-agent`) | `openai` |
 | `--base-url` | OpenAI-compatible API base URL | OpenAI default |
-| `--language` | Target language (`triton`, `python`, `cuda`, `mlx`) | `triton` |
+| `--language` | Target language (`triton`, `python`, `cuda`, `mlx`, `ascendc`) | `triton` |
 | `--target-gpu` | Target GPU architecture hint | `H100` |
 | `--max-opt-rounds` | Maximum optimization rounds | `5` |
 | `--world-model` | Enable co-evolving world model | off |
@@ -220,6 +244,33 @@ bash scripts/mlx_mamba_wm.sh
 | `--kernelbench-eval-mode` | KernelBench evaluation mode (`local` or `modal`) | `local` |
 | `--kernelbench-num-correct-trials` | Number of correctness trials | `5` |
 | `--kernelbench-num-perf-trials` | Number of performance trials | `100` |
+| `--ascendc-build-cmd` | AscendC compile command run inside the candidate project root | — |
+| `--ascendc-test-cmd` | AscendC correctness command run inside the candidate project root | — |
+| `--ascendc-bench-cmd` | AscendC benchmark command; must print `latency_ms=<float>` or equivalent JSON | — |
+| `--ascendc-timeout-seconds` | Timeout per AscendC build/test/bench command | `600` |
+| `--ascendc-reference-latency-ms` | Optional baseline latency for speedup scoring | — |
+
+### Claude Agent SDK Backend
+
+K-Search can call Claude through the Claude Agent SDK without changing the search loop:
+
+```bash
+uv pip install claude-agent-sdk
+```
+
+```bash
+export ANTHROPIC_API_KEY="..."
+python generate_kernels_and_eval.py \
+  --task-source kernelbench \
+  --kernelbench-level 1 \
+  --kernelbench-problem-id 1 \
+  --model-name claude-sonnet-4-6 \
+  --llm-provider claude-agent \
+  --language triton \
+  --max-opt-rounds 1
+```
+
+The initial Claude backend is prompt-to-text only. K-Search still owns code parsing, benchmark execution, world-model updates, and artifact persistence.
 
 ## Baselines
 

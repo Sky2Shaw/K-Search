@@ -13,6 +13,11 @@ TRITON_OPTIMIZATION_HINTS = """
 ** For each round, you can see your current best solution and the previous round's summary, therefore you can implement the kernel step by step.
 """
 
+ASCENDC_OPTIMIZATION_HINTS = """
+** Treat Host tiling, TilingData, blockDim, workspace, TPipe/TQue/TBuf, DataCopy/DataCopyPad, UB/L1/L0, AIC/AIV, Matmul API, tail handling, and alignment as first-class performance surfaces. **
+** For each round, keep changes small enough to compile and evaluate through the AscendC build/correctness/benchmark harness. **
+"""
+
 
 TRITON_PROMPT = """Generate a Triton kernel optimized for {target_gpu} GPU for
 
@@ -77,6 +82,38 @@ Current Implementation:
 Generate the corrected and optimized implementation:"""
 
 
+ASCENDC_PROMPT = """You are a code generator. Generate an AscendC multi-file operator project optimized for {target_gpu}.
+
+Specification:
+{definition}
+
+{per_task_requirement}
+
+{hints}
+
+Generate the implementation:"""
+
+
+ASCENDC_OPTIMIZATION_PROMPT = """You are optimizing an AscendC multi-file operator project for {target_gpu}. The current implementation has issues that need to be fixed or its performance can be improved.
+
+Original Specification:
+{definition}
+
+Current Implementation Status:
+{trace_logs}
+
+Current Implementation:
+{current_code}
+
+{per_task_requirement}
+
+{hints}
+
+{extra_context}
+
+Generate the corrected and optimized implementation:"""
+
+
 def get_prompt_from_definition_text(
     language: str,
     definition_text: str,
@@ -87,7 +124,7 @@ def get_prompt_from_definition_text(
     """
     Task-agnostic prompt builder: takes a fully-rendered definition text.
     """
-    prompts = {"triton": TRITON_PROMPT, "cuda": CUDA_PROMPT}
+    prompts = {"triton": TRITON_PROMPT, "cuda": CUDA_PROMPT, "ascendc": ASCENDC_PROMPT}
 
     if language not in prompts:
         raise ValueError(f"Unsupported language: {language}")
@@ -107,6 +144,13 @@ def get_prompt_from_definition_text(
             per_task_requirement=str(per_task_requirement or "").strip(),
             hints=CUDA_OPTIMIZATION_HINTS,
         )
+    if language == "ascendc":
+        return prompts[language].format(
+            definition=str(definition_text or "").strip(),
+            target_gpu=target_gpu,
+            per_task_requirement=str(per_task_requirement or "").strip(),
+            hints=ASCENDC_OPTIMIZATION_HINTS,
+        )
     return prompts[language].format(definition=str(definition_text or "").strip(), target_gpu=target_gpu)
 
 
@@ -124,7 +168,11 @@ def get_optimization_prompt_from_definition_text(
     """
     Task-agnostic optimization prompt builder: takes rendered definition + rendered trace logs.
     """
-    optimization_prompts = {"triton": TRITON_OPTIMIZATION_PROMPT, "cuda": CUDA_OPTIMIZATION_PROMPT}
+    optimization_prompts = {
+        "triton": TRITON_OPTIMIZATION_PROMPT,
+        "cuda": CUDA_OPTIMIZATION_PROMPT,
+        "ascendc": ASCENDC_OPTIMIZATION_PROMPT,
+    }
 
     if language not in optimization_prompts:
         raise ValueError(f"Unsupported language for optimization: {language}")
@@ -152,6 +200,16 @@ def get_optimization_prompt_from_definition_text(
             target_gpu=target_gpu,
             per_task_requirement=str(per_task_requirement or "").strip(),
             hints=CUDA_OPTIMIZATION_HINTS,
+            extra_context=extra_context,
+        )
+    if language == "ascendc":
+        return optimization_prompts[language].format(
+            definition=str(definition_text or "").strip(),
+            trace_logs=str(trace_logs or "").strip(),
+            current_code=current_code,
+            target_gpu=target_gpu,
+            per_task_requirement=str(per_task_requirement or "").strip(),
+            hints=ASCENDC_OPTIMIZATION_HINTS,
             extra_context=extra_context,
         )
     # Python doesn't use this path

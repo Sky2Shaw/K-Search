@@ -5,11 +5,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 import os
 
-import openai
 from .kernel_generator_prompts import (
     get_optimization_prompt_from_definition_text,
     get_prompt_from_definition_text,
 )
+from .llm_clients import LLMClient, build_llm_client, normalize_llm_provider
 from k_search.tasks.task_base import BuildSpec, Solution, SourceFile, SupportedLanguages
 from k_search.tasks.task_base import Task, code_from_solution
 
@@ -32,7 +32,9 @@ class KernelGenerator:
         target_gpu: str = "H100",
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
-        reasoning_effort: str = "medium",  # only used for openai reasoning models
+        reasoning_effort: str = "medium",  # only used for openai-compatible reasoning models
+        llm_provider: str = "openai",
+        llm_client: Optional[LLMClient] = None,
     ):
         """
         Args:
@@ -42,30 +44,28 @@ class KernelGenerator:
             api_key: API key (if None, uses LLM_API_KEY environment variable)
             base_url: Base URL for the API (need to provide for non-openai api models)
             reasoning_effort: Reasoning effort for OpenAI reasoning models ("low", "medium", "high", default: "medium")
+            llm_provider: LLM backend to use ("openai" or "claude-agent")
+            llm_client: Optional prebuilt client for tests/custom integrations
         """
         self.model_name = model_name
         self.language = language
         self.target_gpu = target_gpu
         self.reasoning_effort = reasoning_effort
-
-        if api_key is None:
-            api_key = os.getenv("LLM_API_KEY")
-            if api_key is None:
-                raise ValueError(
-                    "API key must be provided or set in LLM_API_KEY environment variable"
-                )
-
-        client_kwargs = {"api_key": api_key}
-        if base_url is not None:
-            client_kwargs["base_url"] = base_url
-
-        self.client = openai.OpenAI(**client_kwargs)
+        self.llm_provider = normalize_llm_provider(llm_provider)
+        self.llm_client = llm_client or build_llm_client(
+            llm_provider=self.llm_provider,
+            model_name=self.model_name,
+            api_key=api_key,
+            base_url=base_url,
+            reasoning_effort=self.reasoning_effort,
+        )
 
     def _get_supported_language(self) -> SupportedLanguages:
         language_map = {
             "python": SupportedLanguages.PYTHON,
             "triton": SupportedLanguages.TRITON,
             "cuda": SupportedLanguages.CUDA,
+            "ascendc": SupportedLanguages.ASCENDC,
             "mlx": SupportedLanguages.MLX,
         }
         if self.language.lower() in language_map:
@@ -153,17 +153,7 @@ class KernelGenerator:
         for attempt in range(1, (max_parse_retries if is_cuda else 1) + 1):
             try:
                 effective_prompt = prompt
-
-                if self.model_name.startswith("gpt-5") or self.model_name.startswith("o3"):
-                    response = self.client.responses.create(
-                        model=self.model_name, input=effective_prompt, reasoning={"effort": self.reasoning_effort}
-                    )
-                    generated_code = response.output_text.strip()
-                else:  # We use the completions api for OpenAI SDK compatible models
-                    response = self.client.chat.completions.create(
-                        model=self.model_name, messages=[{"role": "user", "content": effective_prompt}]
-                    )
-                    generated_code = response.choices[0].message.content.strip()
+                generated_code = str(self.llm_client.generate(effective_prompt) or "").strip()
 
                 cleaned_code = self._clean_generated_code(generated_code)
 

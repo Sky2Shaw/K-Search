@@ -6,6 +6,21 @@ from pathlib import Path
 from typing import Any, Optional
 import json
 
+
+def _resolve_llm_config_from_args(args: Any) -> tuple[str, Optional[str]]:
+    from k_search.kernel_generators.llm_clients import normalize_llm_provider
+
+    llm_provider = normalize_llm_provider(getattr(args, "llm_provider", None))
+    if llm_provider == "claude-agent":
+        return llm_provider, getattr(args, "api_key", None)
+
+    api_key = getattr(args, "api_key", None) or os.getenv("LLM_API_KEY")
+    if not api_key:
+        raise ValueError(
+            "API key is required for --llm-provider openai (pass --api-key or set LLM_API_KEY)"
+        )
+    return llm_provider, api_key
+
 def _persist_ksearch_solution(
     solution: Any, *, definition_name: str, artifacts_dir: Optional[str]
 ) -> Optional[Path]:
@@ -103,6 +118,7 @@ def generate_and_evaluate(
     model_name: str,
     base_url: Optional[str],
     api_key: Optional[str],
+    llm_provider: str,
     language: str,
     target_gpu: str,
     max_opt_rounds: int,
@@ -148,6 +164,7 @@ def generate_and_evaluate(
                     "model_name": model_name,
                     "language": language,
                     "target_gpu": target_gpu,
+                    "llm_provider": llm_provider,
                 },
                 "max_opt_rounds": int(max_opt_rounds),
                 "continue_from_solution": continue_from_solution,
@@ -195,6 +212,7 @@ def generate_and_evaluate(
             base_url=base_url,
             artifacts_dir=artifacts_dir,
             wm_max_difficulty=wm_max_difficulty,
+            llm_provider=llm_provider,
         )
     else:
         # Non-world-model mode: baseline-style generator (task-driven).
@@ -206,6 +224,7 @@ def generate_and_evaluate(
             target_gpu=target_gpu,
             api_key=api_key,
             base_url=base_url,
+            llm_provider=llm_provider,
         )
 
     # Generate exactly one solution.
@@ -259,12 +278,117 @@ def generate_and_evaluate(
             pass
 
 
+def _build_task_from_args(args: Any) -> Any:
+    task_source = str(getattr(args, "task_source", None) or "flashinfer")
+    task_path = str(getattr(args, "task_path", None) or (getattr(args, "local", None) or ""))
+    default_language = "ascendc" if task_source == "ascendc" else "triton"
+    language = str(getattr(args, "language", default_language) or default_language).strip().lower()
+
+    if task_source == "flashinfer":
+        from k_search.tasks.flashinfer_bench_task import FlashInferBenchTask
+
+        if language in {"mlx", "ascendc"}:
+            raise ValueError(f"--language {language} is not supported with --task-source=flashinfer")
+
+        if not task_path:
+            raise ValueError("--local or --task-path is required for --task-source=flashinfer")
+        if not getattr(args, "definition", None):
+            raise ValueError("--definition is required")
+        def_name = str(args.definition)
+
+        return FlashInferBenchTask.from_cli_args(
+            task_path=task_path,
+            definition_name=str(def_name),
+            warmup_runs=getattr(args, "warmup_runs", 10),
+            iterations=getattr(args, "iterations", 10),
+            num_trials=getattr(args, "num_trials", 1),
+            rtol=getattr(args, "rtol", 1e-2),
+            atol=getattr(args, "atol", 1e-2),
+            use_isolated_runner=bool(getattr(args, "use_isolated_runner", False)),
+            parallel_workloads=bool(getattr(args, "parallel_workloads", False)),
+            max_parallel_workloads=getattr(args, "max_parallel_workloads", 0),
+            baseline_solution=getattr(args, "baseline_solution", None),
+            feedback_workloads=getattr(args, "feedback_workloads", None),
+            feedback_trace_policy=getattr(args, "feedback_trace_policy", "first"),
+            num_feedback_workloads=5,
+            artifacts_dir=getattr(args, "artifacts_dir", None),
+        )
+    if task_source == "gpumode":
+        from k_search.tasks.gpu_mode_task import GpuModeTriMulTask
+
+        if language in {"mlx", "ascendc"}:
+            raise ValueError(f"--language {language} is not supported with --task-source=gpumode")
+
+        return GpuModeTriMulTask(
+            mode=str(getattr(args, "gpumode_mode", None) or "benchmark"),
+            keep_tmp=bool(getattr(args, "gpumode_keep_tmp", False)),
+            task_dir=(str(getattr(args, "gpumode_task_dir", "")) if getattr(args, "gpumode_task_dir", None) else None),
+            artifacts_dir=getattr(args, "artifacts_dir", None),
+        )
+    if task_source == "kernelbench":
+        from k_search.tasks.kernelbench_task import KernelBenchTask
+
+        if language in {"mlx", "ascendc"}:
+            raise ValueError(f"--language {language} is not supported with --task-source=kernelbench")
+
+        return KernelBenchTask(
+            level=getattr(args, "kernelbench_level", 1),
+            problem_id=getattr(args, "kernelbench_problem_id", 1),
+            eval_mode=getattr(args, "kernelbench_eval_mode", "local"),
+            gpu=getattr(args, "target_gpu", "H100"),
+            num_correct_trials=getattr(args, "kernelbench_num_correct_trials", 5),
+            num_perf_trials=getattr(args, "kernelbench_num_perf_trials", 100),
+            artifacts_dir=getattr(args, "artifacts_dir", None),
+            backend=language,
+        )
+    if task_source == "mlx":
+        def_name = str(getattr(args, "definition", None) or "mlx_mamba_selective_scan_fwd").strip()
+        if def_name in (
+            "mlx_mamba",
+            "mlx_mamba_selective_scan_fwd",
+        ):
+            from k_search.tasks.mlx_mamba_task import MlxMambaSelectiveScanFwdTask
+
+            return MlxMambaSelectiveScanFwdTask(
+                warmup_runs=getattr(args, "warmup_runs", 10),
+                iterations=getattr(args, "iterations", 10),
+                rtol=getattr(args, "rtol", 1e-2),
+                atol=getattr(args, "atol", 1e-2),
+                timeout_seconds=300,
+                artifacts_dir=getattr(args, "artifacts_dir", None),
+                name="mlx_mamba_selective_scan_fwd",
+            )
+        raise ValueError(
+            "Unknown MLX definition. Use --definition one of: "
+            "mlx_mamba_selective_scan_fwd. "
+            f"Got {def_name!r}."
+        )
+    if task_source == "ascendc":
+        from k_search.tasks.ascendc_task import AscendCTask
+
+        if language != "ascendc":
+            raise ValueError("--task-source=ascendc requires --language=ascendc")
+        if not task_path:
+            raise ValueError("--task-path is required for --task-source=ascendc")
+        return AscendCTask(
+            task_path=task_path,
+            definition_name=(str(getattr(args, "definition", "") or "") or None),
+            build_cmd=getattr(args, "ascendc_build_cmd", None),
+            test_cmd=getattr(args, "ascendc_test_cmd", None),
+            bench_cmd=getattr(args, "ascendc_bench_cmd", None),
+            timeout_seconds=int(getattr(args, "ascendc_timeout_seconds", 600) or 600),
+            reference_latency_ms=getattr(args, "ascendc_reference_latency_ms", None),
+            artifacts_dir=getattr(args, "artifacts_dir", None),
+        )
+    raise ValueError(f"Unsupported task_source: {task_source}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate kernels with GPT/Gemini (OpenAI-compatible) and evaluate via task backends.")
     parser.add_argument("--local", required=False, default=None, help="Path to flashinfer-trace dataset root (flashinfer only)")
     parser.add_argument(
         "--task-source",
-        choices=["flashinfer", "gpumode", "kernelbench", "mlx"],
+        choices=["flashinfer", "gpumode", "kernelbench", "mlx", "ascendc"],
         default="flashinfer",
         help="Task backend to use.",
     )
@@ -275,12 +399,22 @@ def main():
     )
     parser.add_argument("--definition", default=None, help="Single definition name to target (required)")
     parser.add_argument("--model-name", required=True, help="LLM model name (e.g., gpt-4.1, gpt-5, gemini-2.5-pro via compatible endpoint)")
+    parser.add_argument(
+        "--llm-provider",
+        default="openai",
+        choices=["openai", "claude-agent"],
+        help="LLM backend: openai for OpenAI-compatible APIs, claude-agent for Claude Agent SDK.",
+    )
     parser.add_argument("--base-url", default=None, help="OpenAI-compatible base URL for non-OpenAI providers (e.g. Gemini proxy)")
-    parser.add_argument("--api-key", default=None, help="API key; if omitted, uses LLM_API_KEY env var")
+    parser.add_argument(
+        "--api-key",
+        default=None,
+        help="API key for the OpenAI-compatible provider; if omitted, uses LLM_API_KEY env var.",
+    )
     parser.add_argument(
         "--language",
         default="triton",
-        choices=["triton", "python", "cuda", "mlx"],
+        choices=["triton", "python", "cuda", "mlx", "ascendc"],
         help="Target language for generated kernel",
     )
     parser.add_argument("--target-gpu", default="H100", help="Target GPU architecture hint for prompts")
@@ -364,6 +498,13 @@ def main():
     parser.add_argument("--kernelbench-num-correct-trials", type=int, default=5, help="Number of correctness trials")
     parser.add_argument("--kernelbench-num-perf-trials", type=int, default=100, help="Number of performance trials")
 
+    # AscendC options
+    parser.add_argument("--ascendc-build-cmd", default=None, help="Shell command that compiles the AscendC candidate in the candidate project root")
+    parser.add_argument("--ascendc-test-cmd", default=None, help="Shell command that validates AscendC correctness in the candidate project root")
+    parser.add_argument("--ascendc-bench-cmd", default=None, help="Shell command that benchmarks the AscendC candidate and prints latency_ms=<float>")
+    parser.add_argument("--ascendc-timeout-seconds", type=int, default=600, help="Timeout per AscendC build/test/bench command")
+    parser.add_argument("--ascendc-reference-latency-ms", type=float, default=None, help="Optional baseline latency used to score speedup")
+
     args = parser.parse_args()
 
     # MLX runs on Apple Silicon; the CUDA-style --target-gpu hint is not meaningful.
@@ -379,102 +520,22 @@ def main():
                 args.target_gpu = "AppleSilicon"
         except Exception:
             args.target_gpu = "AppleSilicon"
+    if str(getattr(args, "task_source", "")).strip().lower() == "ascendc":
+        if str(getattr(args, "target_gpu", "") or "").strip() == "H100":
+            args.target_gpu = "ascend_910b"
+        if str(getattr(args, "language", "") or "").strip().lower() == "triton":
+            args.language = "ascendc"
 
-    api_key = args.api_key or os.getenv("LLM_API_KEY")
-    if not api_key:
-        raise ValueError("API key is required (pass --api-key or set LLM_API_KEY)")
+    llm_provider, api_key = _resolve_llm_config_from_args(args)
 
-    task_source = str(args.task_source or "flashinfer")
-    task_path = str(args.task_path or (args.local or ""))
-    if task_source == "flashinfer":
-        from k_search.tasks.flashinfer_bench_task import FlashInferBenchTask
-
-        if str(args.language).strip().lower() == "mlx":
-            raise ValueError("--language mlx is only supported with --task-source=mlx")
-
-        if not task_path:
-            raise ValueError("--local or --task-path is required for --task-source=flashinfer")
-        if not args.definition:
-            raise ValueError("--definition is required")
-        def_name = str(args.definition)
-
-        task = FlashInferBenchTask.from_cli_args(
-            task_path=task_path,
-            definition_name=str(def_name),
-            warmup_runs=args.warmup_runs,
-            iterations=args.iterations,
-            num_trials=args.num_trials,
-            rtol=args.rtol,
-            atol=args.atol,
-            use_isolated_runner=args.use_isolated_runner,
-            parallel_workloads=args.parallel_workloads,
-            max_parallel_workloads=args.max_parallel_workloads,
-            baseline_solution=args.baseline_solution,
-            feedback_workloads=args.feedback_workloads,
-            feedback_trace_policy=args.feedback_trace_policy,
-            num_feedback_workloads=5,
-            artifacts_dir=args.artifacts_dir,
-        )
-    elif task_source == "gpumode":
-        from k_search.tasks.gpu_mode_task import GpuModeTriMulTask
-
-        if str(args.language).strip().lower() == "mlx":
-            raise ValueError("--language mlx is only supported with --task-source=mlx")
-
-        task = GpuModeTriMulTask(
-            mode=str(args.gpumode_mode or "benchmark"),
-            keep_tmp=bool(args.gpumode_keep_tmp),
-            task_dir=(str(args.gpumode_task_dir) if args.gpumode_task_dir else None),
-            artifacts_dir=args.artifacts_dir,
-        )
-    elif task_source == "kernelbench":
-        from k_search.tasks.kernelbench_task import KernelBenchTask
-
-        if str(args.language).strip().lower() == "mlx":
-            raise ValueError("--language mlx is only supported with --task-source=mlx")
-
-        task = KernelBenchTask(
-            level=args.kernelbench_level,
-            problem_id=args.kernelbench_problem_id,
-            eval_mode=args.kernelbench_eval_mode,
-            gpu=args.target_gpu,
-            num_correct_trials=args.kernelbench_num_correct_trials,
-            num_perf_trials=args.kernelbench_num_perf_trials,
-            artifacts_dir=args.artifacts_dir,
-            backend=args.language,  # Pass language as KernelBench evaluation backend
-        )
-    elif task_source == "mlx":
-        # MLX task selector.
-        def_name = str(args.definition or "mlx_mamba_selective_scan_fwd").strip()
-        if def_name in (
-            "mlx_mamba",
-            "mlx_mamba_selective_scan_fwd",
-        ):
-            from k_search.tasks.mlx_mamba_task import MlxMambaSelectiveScanFwdTask
-
-            task = MlxMambaSelectiveScanFwdTask(
-                warmup_runs=args.warmup_runs,
-                iterations=args.iterations,
-                rtol=args.rtol,
-                atol=args.atol,
-                timeout_seconds=300,
-                artifacts_dir=args.artifacts_dir,
-                name="mlx_mamba_selective_scan_fwd",
-            )
-        else:
-            raise ValueError(
-                "Unknown MLX definition. Use --definition one of: "
-                "mlx_mamba_selective_scan_fwd. "
-                f"Got {def_name!r}."
-            )
-    else:
-        raise ValueError(f"Unsupported task_source: {task_source}")
+    task = _build_task_from_args(args)
 
     generate_and_evaluate(
         task=task,
         model_name=args.model_name,
         base_url=args.base_url,
         api_key=api_key,
+        llm_provider=llm_provider,
         language=args.language,
         target_gpu=args.target_gpu,
         max_opt_rounds=args.max_opt_rounds,
@@ -495,5 +556,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

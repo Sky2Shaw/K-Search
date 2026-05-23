@@ -32,4 +32,10 @@ try:  # pragma: no cover
 except Exception:
     GpuModeTriMulTask = None  # type: ignore
 
+try:  # pragma: no cover
+    from k_search.tasks.ascendc_task import AscendCTask
+
+    __all__.append("AscendCTask")
+except Exception:
+    AscendCTask = None  # type: ignore
 
