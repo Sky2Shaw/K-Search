@@ -248,3 +248,83 @@ def test_get_code_format_text_in_patch_mode_returns_patch_format(tmp_path):
     task = AscendCTask(task_path=tmp_path, definition_name="x", codegen_mode="patch")
     fmt = task.get_code_format_text(language="ascendc", target_gpu="ascend_910b")
     assert "<ascendc_patch>" in fmt
+
+
+def test_make_solution_accepts_patch_response_against_disk_baseline(tmp_path):
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir()
+    (kernel_dir / "foo.h").write_text("int a = 1;\nint b = 2;\nint c = 3;\n", encoding="utf-8")
+    task = AscendCTask(task_path=tmp_path, definition_name="x", codegen_mode="patch")
+
+    raw_patch = (
+        "<ascendc_patch>\n"
+        '<patch path="kernel/foo.h">\n'
+        "@@ -1,3 +1,3 @@\n"
+        " int a = 1;\n"
+        "-int b = 2;\n"
+        "+int b = 22;\n"
+        " int c = 3;\n"
+        "</patch>\n"
+        "</ascendc_patch>\n"
+    )
+    solution = task.make_solution_from_generated_code(
+        cleaned_code=raw_patch,
+        raw_code=raw_patch,
+        round_num=2,
+        model_name="m",
+        target_gpu="ascend_910b",
+        language="ascendc",
+    )
+    foo = next(s for s in solution.sources if s.path == "kernel/foo.h")
+    assert "int b = 22;" in foo.content
+
+
+def test_make_solution_falls_back_to_full_container_when_response_is_not_a_patch(tmp_path):
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir()
+    (kernel_dir / "foo.h").write_text("int a = 1;\n", encoding="utf-8")
+    task = AscendCTask(task_path=tmp_path, definition_name="x", codegen_mode="auto")
+
+    raw_full = format_ascendc_project_files({"kernel/foo.h": "int a = 999;\n"})
+    solution = task.make_solution_from_generated_code(
+        cleaned_code=raw_full,
+        raw_code=raw_full,
+        round_num=2,
+        model_name="m",
+        target_gpu="ascend_910b",
+        language="ascendc",
+    )
+    foo = next(s for s in solution.sources if s.path == "kernel/foo.h")
+    assert foo.content == "int a = 999;"
+
+
+def test_make_solution_records_patch_failure_streak_and_auto_falls_back(tmp_path):
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir()
+    (kernel_dir / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=tmp_path, definition_name="x", codegen_mode="auto")
+
+    bogus_patch = (
+        "<ascendc_patch>\n"
+        '<patch path="kernel/foo.h">\n'
+        "@@ -1,3 +1,3 @@\n"
+        " alpha\n"
+        "-WRONG_CONTEXT\n"
+        "+gamma\n"
+        " beta\n"
+        "</patch>\n"
+        "</ascendc_patch>\n"
+    )
+    # Three failures should trigger fallback to full mode.
+    for _ in range(3):
+        with pytest.raises(ValueError):
+            task.make_solution_from_generated_code(
+                cleaned_code=bogus_patch,
+                raw_code=bogus_patch,
+                round_num=2,
+                model_name="m",
+                target_gpu="ascend_910b",
+                language="ascendc",
+            )
+    assert task.codegen_mode == "full"
+    assert task._patch_failure_streak >= 3
