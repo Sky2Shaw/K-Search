@@ -328,3 +328,67 @@ def test_make_solution_records_patch_failure_streak_and_auto_falls_back(tmp_path
             )
     assert task.codegen_mode == "full"
     assert task._patch_failure_streak >= 3
+
+
+def test_kernel_generator_retries_ascendc_on_bad_patch_then_succeeds(tmp_path, monkeypatch):
+    """A flaky LLM that returns a bad patch on attempt 1 and a good one on attempt 2
+    should produce a parseable solution thanks to the widened retry framework.
+    """
+    from k_search.kernel_generators.kernel_generator import KernelGenerator
+
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir()
+    (kernel_dir / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=tmp_path, definition_name="x", codegen_mode="patch")
+
+    bad_patch = (
+        "<ascendc_patch>\n"
+        '<patch path="kernel/foo.h">\n'
+        "@@ -1,3 +1,3 @@\n"
+        " alpha\n"
+        "-WRONG\n"
+        "+BETA\n"
+        " gamma\n"
+        "</patch>\n"
+        "</ascendc_patch>\n"
+    )
+    good_patch = (
+        "<ascendc_patch>\n"
+        '<patch path="kernel/foo.h">\n'
+        "@@ -1,3 +1,3 @@\n"
+        " alpha\n"
+        "-beta\n"
+        "+BETA\n"
+        " gamma\n"
+        "</patch>\n"
+        "</ascendc_patch>\n"
+    )
+
+    class FlakyClient:
+        def __init__(self):
+            self.calls = 0
+
+        def generate(self, prompt):
+            self.calls += 1
+            return bad_patch if self.calls == 1 else good_patch
+
+    gen = KernelGenerator(
+        model_name="fake",
+        language="ascendc",
+        target_gpu="ascend_910b",
+        llm_client=FlakyClient(),
+    )
+    result = gen._generate_code_from_prompt("ignored prompt", task=task)
+    assert "BETA" in result["raw"]
+    # Calling make_solution_from_generated_code with the same raw must NOT re-fail
+    # (idempotency cache).
+    sol = task.make_solution_from_generated_code(
+        cleaned_code=result["cleaned"],
+        raw_code=result["raw"],
+        round_num=2,
+        model_name="fake",
+        target_gpu="ascend_910b",
+        language="ascendc",
+    )
+    foo = next(s for s in sol.sources if s.path == "kernel/foo.h")
+    assert "BETA" in foo.content
