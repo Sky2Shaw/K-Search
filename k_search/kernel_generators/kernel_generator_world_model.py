@@ -671,7 +671,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                 prompt = prompt + "\n\n" + render_world_model_section(self._wm.get(task.name), max_chars=self._world_model_max_chars)
                 prompt = _append_baseline_hint(prompt)
 
-                code_result = self._generate_code_from_prompt(prompt)
+                code_result = self._generate_code_from_prompt(prompt, task=task)
                 current_code = code_result["cleaned"]
                 current_raw_code = code_result["raw"]
                 _emit_kernel_cu(current_code)

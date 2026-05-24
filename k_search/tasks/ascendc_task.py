@@ -8,13 +8,19 @@ the actual build, correctness, and benchmark commands.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
+from k_search.tasks.ascendc_patch import (
+    ASCENDC_PATCH_FORMAT_TEXT,
+    parse_ascendc_project_patch,
+)
 from k_search.tasks.task_base import (
     BuildSpec,
     EvalResult,
@@ -45,6 +51,8 @@ ASCENDC_CODE_FORMAT_TEXT = """Return only this multi-file container, with no mar
 ]]></file>
 </ascendc_project>
 Include every file needed by the candidate. Keep paths relative to the project root."""
+
+VALID_CODEGEN_MODES = ("auto", "full", "patch")
 
 
 def _normalize_rel_path(path: str) -> str:
@@ -188,6 +196,7 @@ class AscendCTask:
         reference_latency_ms: float | None = None,
         timeout_seconds: int = 600,
         artifacts_dir: str | None = None,
+        codegen_mode: str | None = None,
     ) -> None:
         self.task_path = Path(task_path).expanduser().resolve() if task_path else None
         self._name = str(definition_name or (self.task_path.stem if self.task_path else "ascendc_task")).strip()
@@ -198,6 +207,18 @@ class AscendCTask:
         self.timeout_seconds = int(timeout_seconds or 600)
         self.artifacts_dir = artifacts_dir
         self._last_eval: EvalResult | None = None
+
+        mode = codegen_mode or os.environ.get("KSEARCH_ASCENDC_CODEGEN_MODE") or "auto"
+        mode = str(mode).strip().lower()
+        if mode not in VALID_CODEGEN_MODES:
+            raise ValueError(
+                f"invalid codegen_mode={mode!r}; expected one of {VALID_CODEGEN_MODES}"
+            )
+        self.codegen_mode = mode
+        self._last_parsed_files: dict[str, str] | None = None
+        self._last_parsed_raw: str | None = None
+        self._patch_failure_streak = 0
+        self._max_patch_failures = 3
 
     @property
     def name(self) -> str:
@@ -277,6 +298,16 @@ Generate the implementation:"""
         if current_best:
             extra.append("Current Best Solution So Far:\n" + current_best)
         extra_text = "\n\n".join(extra)
+
+        has_baseline = bool(str(current_code or "").strip())
+        mode = self._resolve_codegen_mode(has_baseline=has_baseline)
+        format_text = self._format_text_for_mode(mode)
+
+        if mode == "patch":
+            response_rule = "- Return only the <ascendc_patch> container (unified diff)."
+        else:
+            response_rule = "- Return only the full AscendC multi-file container."
+
         return f"""You are optimizing an AscendC multi-file operator project for {target_gpu}.
 
 Original Specification:
@@ -294,11 +325,40 @@ Rules:
 - If compilation or correctness failed, fix that first.
 - If it passed, improve measured latency while preserving semantics.
 - Keep changes small enough for one K-Search round.
-- Return only the full AscendC multi-file container.
+{response_rule}
+
+Response format:
+{format_text}
 
 Generate the corrected and optimized implementation:"""
 
+    def _resolve_codegen_mode(self, *, has_baseline: bool) -> str:
+        """Resolve effective mode for one call.
+
+        - "full" -> always full
+        - "patch" -> patch when there is a baseline, else full (cold start safety)
+        - "auto" -> patch when there is a baseline, else full
+        """
+        if self.codegen_mode == "full":
+            return "full"
+        return "patch" if has_baseline else "full"
+
+    def _format_text_for_mode(self, mode: str) -> str:
+        return ASCENDC_PATCH_FORMAT_TEXT if mode == "patch" else ASCENDC_CODE_FORMAT_TEXT
+
+    def get_code_format_text(self, *, language: str, target_gpu: str) -> str:
+        """Hook used by the world-model generator to embed a code-format reminder."""
+        # When the world-model generator builds prompts it always passes a
+        # `base_code` argument; the prompt builders use this format text purely
+        # as a reminder. Returning the patch format is safe because cold-start
+        # prompts (no base) will be parsed leniently in code_for_world_model_from_raw.
+        return self._format_text_for_mode(
+            self._resolve_codegen_mode(has_baseline=True)
+        )
+
     def get_per_task_requirement_text(self, *, language: str, target_gpu: str, phase: str) -> str:
+        if phase == "optimize" and self.codegen_mode != "full":
+            return ASCENDC_PATCH_FORMAT_TEXT
         return ASCENDC_CODE_FORMAT_TEXT
 
     def get_baseline_targets_text(self) -> str:
@@ -309,7 +369,80 @@ Generate the corrected and optimized implementation:"""
     def code_for_world_model_from_raw(self, *, raw: Any, language: str) -> str:
         if isinstance(raw, dict):
             return format_ascendc_project_files({str(k): str(v or "") for k, v in raw.items()})
-        return str(raw or "")
+        text = str(raw or "")
+        # Idempotency: when preview_parse_generated_code has already processed
+        # this exact raw text, `_last_parsed_files` holds the post-patch state.
+        # Re-applying the patch here would mismatch context against the advanced
+        # baseline and silently degrade the WM excerpt to raw diff syntax.
+        if self._last_parsed_raw == text and self._last_parsed_files is not None:
+            return format_ascendc_project_files(self._last_parsed_files)
+        if "<ascendc_patch>" in text or "<patch " in text:
+            try:
+                base_files = self._resolve_patch_base_files()
+                files = parse_ascendc_project_patch(text, base_files=base_files)
+                # Cache the applied result so subsequent patches diff against the
+                # post-patch state, not the pre-patch baseline. We deliberately do
+                # not set _last_parsed_raw — that field is owned by
+                # _parse_codegen_response's preview/commit contract.
+                self._last_parsed_files = dict(files)
+                return format_ascendc_project_files(files)
+            except ValueError:
+                # Bad patch; let the WM see the raw response (truncated upstream).
+                return text
+        return text
+
+    def _load_baseline_files_from_disk(self) -> dict[str, str]:
+        if self.task_path is None or not self.task_path.is_dir():
+            return {}
+        sources = _collect_project_sources(self.task_path)
+        return {s.path: s.content for s in sources}
+
+    def _resolve_patch_base_files(self) -> dict[str, str]:
+        if self._last_parsed_files is not None:
+            return dict(self._last_parsed_files)
+        return self._load_baseline_files_from_disk()
+
+    def _parse_codegen_response(self, raw: Any) -> dict[str, str]:
+        """Try patch first (when allowed), fall back to full container.
+
+        Idempotent on identical input: if we already parsed this exact `raw`
+        payload (typical when the retry framework calls preview_parse and then
+        make_solution_from_generated_code with the same string), return the cached
+        result instead of re-applying the patch (which would now mismatch because
+        `_last_parsed_files` has already advanced).
+        """
+        text = str(raw or "")
+        if self._last_parsed_raw == text and self._last_parsed_files is not None:
+            return dict(self._last_parsed_files)
+
+        looks_like_patch = "<ascendc_patch>" in text or "<patch " in text
+        if self.codegen_mode != "full" and looks_like_patch:
+            try:
+                base_files = self._resolve_patch_base_files()
+                files = parse_ascendc_project_patch(text, base_files=base_files)
+                self._patch_failure_streak = 0
+                self._last_parsed_files = dict(files)
+                self._last_parsed_raw = text
+                return files
+            except ValueError:
+                self._patch_failure_streak += 1
+                if (
+                    self.codegen_mode == "auto"
+                    and self._patch_failure_streak >= self._max_patch_failures
+                ):
+                    print(
+                        f"[WARN] ascendc patch parse failed {self._patch_failure_streak}"
+                        f" times in a row; falling back to full codegen mode.",
+                        file=sys.stderr,
+                    )
+                    self.codegen_mode = "full"
+                raise
+
+        files = parse_ascendc_project_files(text)
+        self._patch_failure_streak = 0
+        self._last_parsed_files = dict(files)
+        self._last_parsed_raw = text
+        return files
 
     def make_solution_from_generated_code(
         self,
@@ -321,7 +454,7 @@ Generate the corrected and optimized implementation:"""
         target_gpu: str,
         language: str,
     ) -> Solution:
-        files = parse_ascendc_project_files(raw_code if raw_code is not None else cleaned_code)
+        files = self._parse_codegen_response(raw_code if raw_code is not None else cleaned_code)
         sources = [SourceFile(path=path, content=content) for path, content in sorted(files.items())]
         return Solution(
             name=f"{model_name}_{self.name}_ascendc_optimized_r{int(round_num)}",
@@ -335,6 +468,18 @@ Generate the corrected and optimized implementation:"""
             sources=sources,
             description=f"{model_name} optimized AscendC project for {self.name} (round {int(round_num)})",
         )
+
+    def preview_parse_generated_code(self, *, raw_code: str) -> None:
+        """Validate that `raw_code` will parse successfully.
+
+        Called by `KernelGenerator._generate_code_from_prompt` immediately after
+        `_clean_generated_code` returns. Raises ValueError on bad patch / bad full
+        container so the retry framework can re-prompt the LLM. State updates
+        (last-parsed-files cache, failure streak) happen inside `_parse_codegen_response`.
+        Safe to call multiple times with the same raw_code: the second call will
+        succeed-trivially because `_last_parsed_files` was updated by the first.
+        """
+        self._parse_codegen_response(raw_code)
 
     def get_solution(self, solution_name: str) -> Solution | None:
         ref = str(solution_name or "").strip()

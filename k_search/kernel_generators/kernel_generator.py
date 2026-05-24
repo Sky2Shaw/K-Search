@@ -144,13 +144,16 @@ class KernelGenerator:
 
         return code
 
-    def _generate_code_from_prompt(self, prompt: str):
-        # If we fail to parse CUDA XML (missing kernel.h/kernel.cu/main.cpp), retry generation.
+    def _generate_code_from_prompt(self, prompt: str, task: Optional[Task] = None):
+        # Retry parse failures up to 5 times for languages with structured multi-file responses.
         max_parse_retries = 5
-        is_cuda = (self.language or "").lower() == "cuda"
+        lang = (self.language or "").lower()
+        is_cuda = lang == "cuda"
+        is_ascendc = lang == "ascendc"
+        should_retry = is_cuda or is_ascendc
 
         last_err: Exception | None = None
-        for attempt in range(1, (max_parse_retries if is_cuda else 1) + 1):
+        for attempt in range(1, (max_parse_retries if should_retry else 1) + 1):
             try:
                 effective_prompt = prompt
                 generated_code = str(self.llm_client.generate(effective_prompt) or "").strip()
@@ -165,18 +168,22 @@ class KernelGenerator:
                     missing = [k for k in required if (k not in cleaned_code) or (not str(cleaned_code.get(k, "")).strip())]
                     if missing:
                         raise ValueError(f"missing required XML files: {missing}")
+                elif is_ascendc and task is not None:
+                    preview = getattr(task, "preview_parse_generated_code", None)
+                    if callable(preview):
+                        preview(raw_code=generated_code)
 
                 return {"raw": generated_code, "cleaned": cleaned_code}
 
             except Exception as e:
                 last_err = e
-                if is_cuda and attempt < max_parse_retries:
-                    print(f"[WARN] CUDA XML parse failed ({e}); retrying generation ({attempt}/{max_parse_retries})...")
+                if should_retry and attempt < max_parse_retries:
+                    tag = "CUDA XML" if is_cuda else "AscendC"
+                    print(f"[WARN] {tag} parse failed ({e}); retrying generation ({attempt}/{max_parse_retries})...")
                     continue
                 print(f"Error while generating code: {e}")
                 raise
 
-        # Unreachable, but keeps type-checkers happy.
         assert last_err is not None
         raise last_err
 
@@ -328,7 +335,7 @@ class KernelGenerator:
                 )
             prompt = _append_baseline_hint(prompt)
             print(prompt)
-            code_result = self._generate_code_from_prompt(prompt)
+            code_result = self._generate_code_from_prompt(prompt, task=task)
             current_code = code_result["cleaned"]
             current_raw_code = code_result["raw"]
 
@@ -551,7 +558,7 @@ class KernelGenerator:
                 opt_prompt = _append_baseline_hint(opt_prompt)
                 print(opt_prompt)
                 print(f"Generating optimized code for round {round_num + 1}...")
-                code_result = self._generate_code_from_prompt(opt_prompt)
+                code_result = self._generate_code_from_prompt(opt_prompt, task=task)
                 current_code = code_result["cleaned"]
                 current_raw_code = code_result["raw"]
 

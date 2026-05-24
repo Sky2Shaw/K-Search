@@ -379,6 +379,7 @@ def _build_task_from_args(args: Any) -> Any:
             timeout_seconds=int(getattr(args, "ascendc_timeout_seconds", 600) or 600),
             reference_latency_ms=getattr(args, "ascendc_reference_latency_ms", None),
             artifacts_dir=getattr(args, "artifacts_dir", None),
+            codegen_mode=getattr(args, "ascendc_codegen_mode", None),
         )
     raise ValueError(f"Unsupported task_source: {task_source}")
 
@@ -504,6 +505,17 @@ def main():
     parser.add_argument("--ascendc-bench-cmd", default=None, help="Shell command that benchmarks the AscendC candidate and prints latency_ms=<float>")
     parser.add_argument("--ascendc-timeout-seconds", type=int, default=600, help="Timeout per AscendC build/test/bench command")
     parser.add_argument("--ascendc-reference-latency-ms", type=float, default=None, help="Optional baseline latency used to score speedup")
+    parser.add_argument(
+        "--ascendc-codegen-mode",
+        choices=["auto", "full", "patch"],
+        default=None,
+        help=(
+            "AscendC codegen response format. 'auto' (default) emits patches when a baseline "
+            "is available and full containers otherwise. 'full' forces the legacy full "
+            "multi-file container every round (regression-safe). 'patch' forces unified-diff "
+            "responses. Falls back to env var KSEARCH_ASCENDC_CODEGEN_MODE."
+        ),
+    )
 
     args = parser.parse_args()
 

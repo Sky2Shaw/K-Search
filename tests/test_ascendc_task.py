@@ -2,6 +2,8 @@ import shlex
 import sys
 from pathlib import Path
 
+import pytest
+
 from k_search.tasks.task_base import BuildSpec, Solution, SourceFile, SupportedLanguages, code_from_solution
 from k_search.kernel_generators.kernel_generator_prompts import get_prompt_from_definition_text
 from k_search.kernel_generators.world_model_prompts import get_generate_code_from_action_prompt_from_text
@@ -177,3 +179,248 @@ def test_ascendc_prompt_builders_accept_ascendc_language():
     assert "ascend_910b" in prompt
     assert "<ascendc_project>" in prompt
     assert "Increase tile length" in action_prompt
+
+
+def test_ascendc_task_defaults_to_auto_codegen_mode():
+    task = AscendCTask(task_path=None, definition_name="x")
+    assert task.codegen_mode == "auto"
+
+
+def test_ascendc_task_reads_codegen_mode_from_env(monkeypatch):
+    monkeypatch.setenv("KSEARCH_ASCENDC_CODEGEN_MODE", "full")
+    task = AscendCTask(task_path=None, definition_name="x")
+    assert task.codegen_mode == "full"
+
+
+def test_ascendc_task_explicit_codegen_mode_overrides_env(monkeypatch):
+    monkeypatch.setenv("KSEARCH_ASCENDC_CODEGEN_MODE", "full")
+    task = AscendCTask(task_path=None, definition_name="x", codegen_mode="patch")
+    assert task.codegen_mode == "patch"
+
+
+def test_ascendc_task_invalid_codegen_mode_raises():
+    with pytest.raises(ValueError):
+        AscendCTask(task_path=None, definition_name="x", codegen_mode="bogus")
+
+
+def test_get_optimization_prompt_uses_patch_format_when_baseline_available(tmp_path):
+    (tmp_path / "spec.md").write_text("Vector add.", encoding="utf-8")
+    task = AscendCTask(task_path=tmp_path, definition_name="x", codegen_mode="patch")
+    prompt = task.get_optimization_prompt(
+        language="ascendc",
+        target_gpu="ascend_910b",
+        trace_logs="ok",
+        current_code='<ascendc_project><file path="kernel.cpp">int a=1;</file></ascendc_project>',
+    )
+    assert "<ascendc_patch>" in prompt
+    assert "@@" in prompt
+    # We must NOT instruct the model to emit the full container in patch mode.
+    assert "Return only the full AscendC multi-file container" not in prompt
+
+
+def test_get_optimization_prompt_falls_back_to_full_when_current_code_empty(tmp_path):
+    (tmp_path / "spec.md").write_text("Vector add.", encoding="utf-8")
+    task = AscendCTask(task_path=tmp_path, definition_name="x", codegen_mode="patch")
+    prompt = task.get_optimization_prompt(
+        language="ascendc",
+        target_gpu="ascend_910b",
+        trace_logs="ok",
+        current_code="",
+    )
+    assert "<ascendc_project>" in prompt
+    assert "<ascendc_patch>" not in prompt
+
+
+def test_get_optimization_prompt_in_full_mode_never_emits_patch_format(tmp_path):
+    (tmp_path / "spec.md").write_text("Vector add.", encoding="utf-8")
+    task = AscendCTask(task_path=tmp_path, definition_name="x", codegen_mode="full")
+    prompt = task.get_optimization_prompt(
+        language="ascendc",
+        target_gpu="ascend_910b",
+        trace_logs="ok",
+        current_code="<ascendc_project></ascendc_project>",
+    )
+    assert "<ascendc_patch>" not in prompt
+    assert "<ascendc_project>" in prompt
+
+
+def test_get_code_format_text_in_patch_mode_returns_patch_format(tmp_path):
+    task = AscendCTask(task_path=tmp_path, definition_name="x", codegen_mode="patch")
+    fmt = task.get_code_format_text(language="ascendc", target_gpu="ascend_910b")
+    assert "<ascendc_patch>" in fmt
+
+
+def test_make_solution_accepts_patch_response_against_disk_baseline(tmp_path):
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir()
+    (kernel_dir / "foo.h").write_text("int a = 1;\nint b = 2;\nint c = 3;\n", encoding="utf-8")
+    task = AscendCTask(task_path=tmp_path, definition_name="x", codegen_mode="patch")
+
+    raw_patch = (
+        "<ascendc_patch>\n"
+        '<patch path="kernel/foo.h">\n'
+        "@@ -1,3 +1,3 @@\n"
+        " int a = 1;\n"
+        "-int b = 2;\n"
+        "+int b = 22;\n"
+        " int c = 3;\n"
+        "</patch>\n"
+        "</ascendc_patch>\n"
+    )
+    solution = task.make_solution_from_generated_code(
+        cleaned_code=raw_patch,
+        raw_code=raw_patch,
+        round_num=2,
+        model_name="m",
+        target_gpu="ascend_910b",
+        language="ascendc",
+    )
+    foo = next(s for s in solution.sources if s.path == "kernel/foo.h")
+    assert "int b = 22;" in foo.content
+
+
+def test_make_solution_falls_back_to_full_container_when_response_is_not_a_patch(tmp_path):
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir()
+    (kernel_dir / "foo.h").write_text("int a = 1;\n", encoding="utf-8")
+    task = AscendCTask(task_path=tmp_path, definition_name="x", codegen_mode="auto")
+
+    raw_full = format_ascendc_project_files({"kernel/foo.h": "int a = 999;\n"})
+    solution = task.make_solution_from_generated_code(
+        cleaned_code=raw_full,
+        raw_code=raw_full,
+        round_num=2,
+        model_name="m",
+        target_gpu="ascend_910b",
+        language="ascendc",
+    )
+    foo = next(s for s in solution.sources if s.path == "kernel/foo.h")
+    assert foo.content == "int a = 999;"
+
+
+def test_make_solution_records_patch_failure_streak_and_auto_falls_back(tmp_path):
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir()
+    (kernel_dir / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=tmp_path, definition_name="x", codegen_mode="auto")
+
+    bogus_patch = (
+        "<ascendc_patch>\n"
+        '<patch path="kernel/foo.h">\n'
+        "@@ -1,3 +1,3 @@\n"
+        " alpha\n"
+        "-WRONG_CONTEXT\n"
+        "+gamma\n"
+        " beta\n"
+        "</patch>\n"
+        "</ascendc_patch>\n"
+    )
+    # Three failures should trigger fallback to full mode.
+    for _ in range(3):
+        with pytest.raises(ValueError):
+            task.make_solution_from_generated_code(
+                cleaned_code=bogus_patch,
+                raw_code=bogus_patch,
+                round_num=2,
+                model_name="m",
+                target_gpu="ascend_910b",
+                language="ascendc",
+            )
+    assert task.codegen_mode == "full"
+    assert task._patch_failure_streak >= 3
+
+
+def test_kernel_generator_retries_ascendc_on_bad_patch_then_succeeds(tmp_path, monkeypatch):
+    """A flaky LLM that returns a bad patch on attempt 1 and a good one on attempt 2
+    should produce a parseable solution thanks to the widened retry framework.
+    """
+    from k_search.kernel_generators.kernel_generator import KernelGenerator
+
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir()
+    (kernel_dir / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=tmp_path, definition_name="x", codegen_mode="patch")
+
+    bad_patch = (
+        "<ascendc_patch>\n"
+        '<patch path="kernel/foo.h">\n'
+        "@@ -1,3 +1,3 @@\n"
+        " alpha\n"
+        "-WRONG\n"
+        "+BETA\n"
+        " gamma\n"
+        "</patch>\n"
+        "</ascendc_patch>\n"
+    )
+    good_patch = (
+        "<ascendc_patch>\n"
+        '<patch path="kernel/foo.h">\n'
+        "@@ -1,3 +1,3 @@\n"
+        " alpha\n"
+        "-beta\n"
+        "+BETA\n"
+        " gamma\n"
+        "</patch>\n"
+        "</ascendc_patch>\n"
+    )
+
+    class FlakyClient:
+        def __init__(self):
+            self.calls = 0
+
+        def generate(self, prompt):
+            self.calls += 1
+            return bad_patch if self.calls == 1 else good_patch
+
+    gen = KernelGenerator(
+        model_name="fake",
+        language="ascendc",
+        target_gpu="ascend_910b",
+        llm_client=FlakyClient(),
+    )
+    result = gen._generate_code_from_prompt("ignored prompt", task=task)
+    assert "BETA" in result["raw"]
+    # Calling make_solution_from_generated_code with the same raw must NOT re-fail
+    # (idempotency cache).
+    sol = task.make_solution_from_generated_code(
+        cleaned_code=result["cleaned"],
+        raw_code=result["raw"],
+        round_num=2,
+        model_name="fake",
+        target_gpu="ascend_910b",
+        language="ascendc",
+    )
+    foo = next(s for s in sol.sources if s.path == "kernel/foo.h")
+    assert "BETA" in foo.content
+
+
+def test_code_for_world_model_from_raw_returns_applied_code_after_preview_parse(tmp_path):
+    """After preview_parse_generated_code processes a patch, code_for_world_model_from_raw
+    on the same raw text must NOT re-apply the patch (which would silently fail because
+    the cached baseline has advanced) — it must return the post-patch <ascendc_project>
+    container so the world model sees expanded code, not diff syntax.
+    """
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir()
+    (kernel_dir / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=tmp_path, definition_name="x", codegen_mode="patch")
+
+    raw_patch = (
+        "<ascendc_patch>\n"
+        '<patch path="kernel/foo.h">\n'
+        "@@ -1,3 +1,3 @@\n"
+        " alpha\n"
+        "-beta\n"
+        "+BETA\n"
+        " gamma\n"
+        "</patch>\n"
+        "</ascendc_patch>\n"
+    )
+    # Step 1: retry-framework path — preview parses the patch and caches the result.
+    task.preview_parse_generated_code(raw_code=raw_patch)
+    # Step 2: WM loop path — same raw text fed to code_for_world_model_from_raw.
+    wm_excerpt = task.code_for_world_model_from_raw(raw=raw_patch, language="ascendc")
+    # The excerpt must be the applied result rendered as <ascendc_project>, NOT raw diff.
+    assert "<ascendc_project>" in wm_excerpt
+    assert "<ascendc_patch>" not in wm_excerpt
+    assert "BETA" in wm_excerpt
