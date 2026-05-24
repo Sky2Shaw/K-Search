@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# K-Search optimization run for cv_agent's multi_query_attention on Ascend 910B.
+#
+# Pre-conditions:
+#   1. Claude Agent SDK installed:   uv pip install claude-agent-sdk
+#   2. cv_agent baseline measured;   export BASELINE_MS=<float>  (mean_us/1000 from utils/run_perf.py)
+#   3. ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL exported, or present in
+#      ~/.claude/settings.json (auto-loaded below if jq is installed).
+set -euo pipefail
+
+# --- Auto-load env from ~/.claude/settings.json if available -----------------
+if command -v jq >/dev/null 2>&1 && [ -f "$HOME/.claude/settings.json" ]; then
+    while IFS='=' read -r k v; do
+        # Only export keys that are not already set, so caller can override.
+        if [ -n "$k" ] && [ -z "${!k:-}" ]; then
+            export "$k=$v"
+        fi
+    done < <(jq -r '.env | to_entries[] | .key + "=" + (.value|tostring)' "$HOME/.claude/settings.json")
+fi
+
+# --- Required env ------------------------------------------------------------
+: "${ANTHROPIC_AUTH_TOKEN:?missing - export it or set .env.ANTHROPIC_AUTH_TOKEN in ~/.claude/settings.json}"
+: "${ANTHROPIC_BASE_URL:?missing - export it or set .env.ANTHROPIC_BASE_URL in ~/.claude/settings.json}"
+: "${BASELINE_MS:?run baseline first and export BASELINE_MS (mean_us/1000 from utils/run_perf.py)}"
+
+# --- Configurable ------------------------------------------------------------
+KSEARCH_ROOT="${KSEARCH_ROOT:-/mnt/workspace/K-Search}"
+TASK_DIR="${TASK_DIR:-/mnt/workspace/cv_agent/tile2asc/multi_query_attention}"
+MODEL_NAME="${MODEL_NAME:-claude-sonnet-4-6}"
+MAX_ROUNDS="${MAX_ROUNDS:-20}"
+TARGET_GPU="${TARGET_GPU:-Ascend910B3}"
+TIMEOUT_S="${TIMEOUT_S:-900}"
+ARTIFACTS_DIR="${ARTIFACTS_DIR:-.ksearch-output-mqa}"
+
+# Help SDK pick a reasonable HTTP timeout for long prompts.
+export API_TIMEOUT_MS="${API_TIMEOUT_MS:-1200000}"
+# Raise output cap for code-generation responses (default in SDK is 32000).
+export CLAUDE_CODE_MAX_OUTPUT_TOKENS="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-64000}"
+
+cd "$KSEARCH_ROOT"
+
+python generate_kernels_and_eval.py \
+    --task-source ascendc \
+    --task-path "$TASK_DIR" \
+    --definition "$(basename "$TASK_DIR")" \
+    --model-name "$MODEL_NAME" \
+    --llm-provider claude-agent \
+    --language ascendc \
+    --target-gpu "$TARGET_GPU" \
+    --ascendc-build-cmd  "./ksearch_build.sh" \
+    --ascendc-test-cmd   "./ksearch_test.sh" \
+    --ascendc-bench-cmd  "./ksearch_bench.sh" \
+    --ascendc-reference-latency-ms "$BASELINE_MS" \
+    --ascendc-timeout-seconds "$TIMEOUT_S" \
+    --world-model \
+    --max-opt-rounds "$MAX_ROUNDS" \
+    --artifacts-dir "$ARTIFACTS_DIR" \
+    --save-solutions

@@ -75,11 +75,34 @@ class OpenAICompatibleLLMClient:
         return str(getattr(message, "content", "") or "").strip()
 
 
+def _default_claude_agent_max_turns() -> Optional[int]:
+    """Default unlimited (None). Per SDK design `max_turns` counts conversation
+    rounds, not chunks of long output, so single-completion use cases should
+    not cap it. Override via env CLAUDE_AGENT_MAX_TURNS for diagnostics.
+    """
+    raw = os.getenv("CLAUDE_AGENT_MAX_TURNS")
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _default_claude_agent_thinking_enabled() -> bool:
+    raw = os.getenv("CLAUDE_AGENT_THINKING", "").strip().lower()
+    if raw in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    return False
+
+
 @dataclass
 class ClaudeAgentLLMClient:
     model_name: str
-    max_turns: int = 1
+    max_turns: Optional[int] = field(default_factory=_default_claude_agent_max_turns)
     allowed_tools: list[str] = field(default_factory=list)
+    thinking_enabled: bool = field(default_factory=_default_claude_agent_thinking_enabled)
 
     def generate(self, prompt: str) -> str:
         try:
@@ -91,11 +114,16 @@ class ClaudeAgentLLMClient:
             ) from exc
 
         async def _run_query() -> str:
-            options = claude_agent_sdk.ClaudeAgentOptions(
-                model=self.model_name,
-                allowed_tools=list(self.allowed_tools),
-                max_turns=self.max_turns,
-            )
+            options_kwargs: dict[str, Any] = {
+                "model": self.model_name,
+                "allowed_tools": list(self.allowed_tools),
+                "permission_mode": "bypassPermissions",
+            }
+            if self.max_turns is not None:
+                options_kwargs["max_turns"] = self.max_turns
+            if not self.thinking_enabled:
+                options_kwargs["thinking"] = {"type": "disabled"}
+            options = claude_agent_sdk.ClaudeAgentOptions(**options_kwargs)
             assistant_chunks: list[str] = []
             final_text = ""
             try:
