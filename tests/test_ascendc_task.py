@@ -201,3 +201,50 @@ def test_ascendc_task_explicit_codegen_mode_overrides_env(monkeypatch):
 def test_ascendc_task_invalid_codegen_mode_raises():
     with pytest.raises(ValueError):
         AscendCTask(task_path=None, definition_name="x", codegen_mode="bogus")
+
+
+def test_get_optimization_prompt_uses_patch_format_when_baseline_available(tmp_path):
+    (tmp_path / "spec.md").write_text("Vector add.", encoding="utf-8")
+    task = AscendCTask(task_path=tmp_path, definition_name="x", codegen_mode="patch")
+    prompt = task.get_optimization_prompt(
+        language="ascendc",
+        target_gpu="ascend_910b",
+        trace_logs="ok",
+        current_code='<ascendc_project><file path="kernel.cpp">int a=1;</file></ascendc_project>',
+    )
+    assert "<ascendc_patch>" in prompt
+    assert "@@" in prompt
+    # We must NOT instruct the model to emit the full container in patch mode.
+    assert "Return only the full AscendC multi-file container" not in prompt
+
+
+def test_get_optimization_prompt_falls_back_to_full_when_current_code_empty(tmp_path):
+    (tmp_path / "spec.md").write_text("Vector add.", encoding="utf-8")
+    task = AscendCTask(task_path=tmp_path, definition_name="x", codegen_mode="patch")
+    prompt = task.get_optimization_prompt(
+        language="ascendc",
+        target_gpu="ascend_910b",
+        trace_logs="ok",
+        current_code="",
+    )
+    assert "<ascendc_project>" in prompt
+    assert "<ascendc_patch>" not in prompt
+
+
+def test_get_optimization_prompt_in_full_mode_never_emits_patch_format(tmp_path):
+    (tmp_path / "spec.md").write_text("Vector add.", encoding="utf-8")
+    task = AscendCTask(task_path=tmp_path, definition_name="x", codegen_mode="full")
+    prompt = task.get_optimization_prompt(
+        language="ascendc",
+        target_gpu="ascend_910b",
+        trace_logs="ok",
+        current_code="<ascendc_project></ascendc_project>",
+    )
+    assert "<ascendc_patch>" not in prompt
+    assert "<ascendc_project>" in prompt
+
+
+def test_get_code_format_text_in_patch_mode_returns_patch_format(tmp_path):
+    task = AscendCTask(task_path=tmp_path, definition_name="x", codegen_mode="patch")
+    fmt = task.get_code_format_text(language="ascendc", target_gpu="ascend_910b")
+    assert "<ascendc_patch>" in fmt

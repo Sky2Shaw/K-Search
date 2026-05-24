@@ -16,6 +16,10 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from k_search.tasks.ascendc_patch import (
+    ASCENDC_PATCH_FORMAT_TEXT,
+    parse_ascendc_project_patch,
+)
 from k_search.tasks.task_base import (
     BuildSpec,
     EvalResult,
@@ -293,6 +297,16 @@ Generate the implementation:"""
         if current_best:
             extra.append("Current Best Solution So Far:\n" + current_best)
         extra_text = "\n\n".join(extra)
+
+        has_baseline = bool(str(current_code or "").strip())
+        mode = self._resolve_codegen_mode(has_baseline=has_baseline)
+        format_text = self._format_text_for_mode(mode)
+
+        if mode == "patch":
+            response_rule = "- Return only the <ascendc_patch> container (unified diff)."
+        else:
+            response_rule = "- Return only the full AscendC multi-file container."
+
         return f"""You are optimizing an AscendC multi-file operator project for {target_gpu}.
 
 Original Specification:
@@ -310,11 +324,40 @@ Rules:
 - If compilation or correctness failed, fix that first.
 - If it passed, improve measured latency while preserving semantics.
 - Keep changes small enough for one K-Search round.
-- Return only the full AscendC multi-file container.
+{response_rule}
+
+Response format:
+{format_text}
 
 Generate the corrected and optimized implementation:"""
 
+    def _resolve_codegen_mode(self, *, has_baseline: bool) -> str:
+        """Resolve effective mode for one call.
+
+        - "full" -> always full
+        - "patch" -> patch when there is a baseline, else full (cold start safety)
+        - "auto" -> patch when there is a baseline, else full
+        """
+        if self.codegen_mode == "full":
+            return "full"
+        return "patch" if has_baseline else "full"
+
+    def _format_text_for_mode(self, mode: str) -> str:
+        return ASCENDC_PATCH_FORMAT_TEXT if mode == "patch" else ASCENDC_CODE_FORMAT_TEXT
+
+    def get_code_format_text(self, *, language: str, target_gpu: str) -> str:
+        """Hook used by the world-model generator to embed a code-format reminder."""
+        # When the world-model generator builds prompts it always passes a
+        # `base_code` argument; the prompt builders use this format text purely
+        # as a reminder. Returning the patch format is safe because cold-start
+        # prompts (no base) will be parsed leniently in code_for_world_model_from_raw.
+        return self._format_text_for_mode(
+            self._resolve_codegen_mode(has_baseline=True)
+        )
+
     def get_per_task_requirement_text(self, *, language: str, target_gpu: str, phase: str) -> str:
+        if phase == "optimize" and self.codegen_mode != "full":
+            return ASCENDC_PATCH_FORMAT_TEXT
         return ASCENDC_CODE_FORMAT_TEXT
 
     def get_baseline_targets_text(self) -> str:
