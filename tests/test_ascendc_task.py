@@ -1,6 +1,9 @@
+import os
 import shlex
 import sys
 from pathlib import Path
+
+import pytest
 
 from k_search.tasks.task_base import BuildSpec, Solution, SourceFile, SupportedLanguages, code_from_solution
 from k_search.kernel_generators.kernel_generator_prompts import get_prompt_from_definition_text
@@ -177,3 +180,25 @@ def test_ascendc_prompt_builders_accept_ascendc_language():
     assert "ascend_910b" in prompt
     assert "<ascendc_project>" in prompt
     assert "Increase tile length" in action_prompt
+
+
+def test_ascendc_task_defaults_to_auto_codegen_mode():
+    task = AscendCTask(task_path=None, definition_name="x")
+    assert task.codegen_mode == "auto"
+
+
+def test_ascendc_task_reads_codegen_mode_from_env(monkeypatch):
+    monkeypatch.setenv("KSEARCH_ASCENDC_CODEGEN_MODE", "full")
+    task = AscendCTask(task_path=None, definition_name="x")
+    assert task.codegen_mode == "full"
+
+
+def test_ascendc_task_explicit_codegen_mode_overrides_env(monkeypatch):
+    monkeypatch.setenv("KSEARCH_ASCENDC_CODEGEN_MODE", "full")
+    task = AscendCTask(task_path=None, definition_name="x", codegen_mode="patch")
+    assert task.codegen_mode == "patch"
+
+
+def test_ascendc_task_invalid_codegen_mode_raises():
+    with pytest.raises(ValueError):
+        AscendCTask(task_path=None, definition_name="x", codegen_mode="bogus")

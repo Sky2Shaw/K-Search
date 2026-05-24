@@ -8,6 +8,7 @@ the actual build, correctness, and benchmark commands.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -45,6 +46,8 @@ ASCENDC_CODE_FORMAT_TEXT = """Return only this multi-file container, with no mar
 ]]></file>
 </ascendc_project>
 Include every file needed by the candidate. Keep paths relative to the project root."""
+
+VALID_CODEGEN_MODES = ("auto", "full", "patch")
 
 
 def _normalize_rel_path(path: str) -> str:
@@ -188,6 +191,7 @@ class AscendCTask:
         reference_latency_ms: float | None = None,
         timeout_seconds: int = 600,
         artifacts_dir: str | None = None,
+        codegen_mode: str | None = None,
     ) -> None:
         self.task_path = Path(task_path).expanduser().resolve() if task_path else None
         self._name = str(definition_name or (self.task_path.stem if self.task_path else "ascendc_task")).strip()
@@ -198,6 +202,18 @@ class AscendCTask:
         self.timeout_seconds = int(timeout_seconds or 600)
         self.artifacts_dir = artifacts_dir
         self._last_eval: EvalResult | None = None
+
+        mode = codegen_mode or os.environ.get("KSEARCH_ASCENDC_CODEGEN_MODE") or "auto"
+        mode = str(mode).strip().lower()
+        if mode not in VALID_CODEGEN_MODES:
+            raise ValueError(
+                f"invalid codegen_mode={mode!r}; expected one of {VALID_CODEGEN_MODES}"
+            )
+        self.codegen_mode = mode
+        self._last_parsed_files: dict[str, str] | None = None
+        self._last_parsed_raw: str | None = None
+        self._patch_failure_streak = 0
+        self._max_patch_failures = 3
 
     @property
     def name(self) -> str:
