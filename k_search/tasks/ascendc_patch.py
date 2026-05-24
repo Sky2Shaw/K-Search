@@ -51,17 +51,6 @@ def _normalize_newlines(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def _split_lines_keep_trailing(text: str) -> List[str]:
-    """Split into lines preserving information about a trailing newline.
-
-    A trailing newline produces an empty final element so that re-joining with
-    "\\n" round-trips. Files with no trailing newline produce no extra element.
-    """
-    if text == "":
-        return [""]
-    parts = text.split("\n")
-    return parts
-
 
 def _join_lines(lines: Iterable[str]) -> str:
     return "\n".join(lines)
@@ -84,6 +73,10 @@ def _iter_hunks(diff_body: str) -> Iterable[Tuple[int, int, List[str]]]:
         while i < n and not _HUNK_HEADER_RE.match(lines[i]):
             hunk.append(lines[i])
             i += 1
+        # Strip trailing empty strings that are artifacts of split("\n") on
+        # a diff body ending with a newline; they are not real blank context lines.
+        while hunk and hunk[-1] == "":
+            hunk.pop()
         yield orig_start, orig_count, hunk
 
 
@@ -108,6 +101,8 @@ def apply_unified_diff(base_text: str, diff_body: str) -> str:
 
     for orig_start, _orig_count, hunk_lines in hunks:
         target_idx = orig_start - 1  # convert 1-indexed to 0-indexed
+        if orig_start == 0:
+            target_idx = 0  # BOF insertion: @@ -0,0 +1,N @@
         if target_idx < cursor:
             raise ValueError(
                 f"hunks out of order: hunk starts at line {orig_start} but "
@@ -196,7 +191,10 @@ def parse_ascendc_project_patch(
                 f"patch references unknown file {path!r}; use op=\"replace\" "
                 "to create a new file"
             )
-        out[path] = apply_unified_diff(out[path], body)
+        try:
+            out[path] = apply_unified_diff(out[path], body)
+        except ValueError as exc:
+            raise ValueError(f"patch for {path!r}: {exc}") from exc
 
     if not matched:
         raise ValueError("response contained <ascendc_patch> but no <patch> blocks")

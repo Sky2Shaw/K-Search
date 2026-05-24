@@ -124,3 +124,33 @@ def test_ascendc_patch_format_text_documents_unified_diff_and_replace_op():
     assert "<ascendc_patch>" in ASCENDC_PATCH_FORMAT_TEXT
     assert "@@" in ASCENDC_PATCH_FORMAT_TEXT
     assert 'op="replace"' in ASCENDC_PATCH_FORMAT_TEXT
+
+
+def test_apply_unified_diff_supports_beginning_of_file_insertion():
+    base = "line1\nline2\n"
+    diff = (
+        "@@ -0,0 +1,2 @@\n"
+        "+inserted_at_top_1\n"
+        "+inserted_at_top_2\n"
+    )
+    result = apply_unified_diff(base, diff)
+    assert result == "inserted_at_top_1\ninserted_at_top_2\nline1\nline2\n"
+
+
+def test_parse_ascendc_project_patch_error_message_includes_file_path():
+    base_files = {"kernel/foo.h": "alpha\nbeta\ngamma\n"}
+    raw = (
+        "<ascendc_patch>\n"
+        '<patch path="kernel/foo.h">\n'
+        "@@ -1,3 +1,3 @@\n"
+        " alpha\n"
+        "-WRONG\n"
+        "+BETA\n"
+        " gamma\n"
+        "</patch>\n"
+        "</ascendc_patch>\n"
+    )
+    with pytest.raises(ValueError) as exc_info:
+        parse_ascendc_project_patch(raw, base_files=base_files)
+    assert "kernel/foo.h" in str(exc_info.value)
+
