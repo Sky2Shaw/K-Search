@@ -80,18 +80,72 @@ def _iter_hunks(diff_body: str) -> Iterable[Tuple[int, int, List[str]]]:
         yield orig_start, orig_count, hunk
 
 
+def _locate_hunk_by_context(
+    base_lines: List[str],
+    hunk_lines: List[str],
+    hint_idx: int,
+    *,
+    min_cursor: int,
+) -> int:
+    """Find where the hunk's context (and removal) lines actually live in base.
+
+    LLM-generated unified diffs frequently carry wrong `orig_start` line numbers
+    while the surrounding context content is correct. We rebuild the expected
+    "left side" of the hunk (context + removal lines, in declared order, with
+    the leading tag stripped) and search ``base_lines`` for that exact subsequence.
+
+    Returns the 0-indexed line where the hunk should be applied. If the hunk is
+    pure-insertion (no context/removal lines), falls back to ``hint_idx``.
+    Raises ValueError if nothing matches or only matches lie before ``min_cursor``.
+    """
+    expected: List[str] = []
+    for hl in hunk_lines:
+        if hl.startswith("\\ "):
+            continue
+        if hl == "":
+            expected.append("")
+            continue
+        tag, body = hl[0], hl[1:]
+        if tag in (" ", "-"):
+            expected.append(body)
+
+    if not expected:
+        # Pure insertion. Trust hint but clamp to bounds.
+        return max(min_cursor, min(hint_idx, len(base_lines)))
+
+    n = len(expected)
+    candidates: List[int] = []
+    for start in range(min_cursor, len(base_lines) - n + 1):
+        if base_lines[start : start + n] == expected:
+            candidates.append(start)
+    if not candidates:
+        # One last try: fuzzy on whitespace (strip both sides).
+        expected_stripped = [s.strip() for s in expected]
+        for start in range(min_cursor, len(base_lines) - n + 1):
+            window = [s.strip() for s in base_lines[start : start + n]]
+            if window == expected_stripped:
+                candidates.append(start)
+    if not candidates:
+        raise ValueError(
+            "context mismatch: could not locate hunk context in base file "
+            f"(hint line {hint_idx + 1}, {n} context/removal lines)"
+        )
+    # Prefer the candidate closest to the hint.
+    return min(candidates, key=lambda c: abs(c - hint_idx))
+
+
 def apply_unified_diff(base_text: str, diff_body: str) -> str:
     """Apply a unified-diff body (no file headers) to ``base_text``.
 
     The diff must NOT include `--- a/...` / `+++ b/...` headers; the patch
-    container strips those before calling us. Each hunk is located by its
-    declared `orig_start` line, with the context lines verified against the
-    base. A context mismatch raises ValueError so the caller can retry.
+    container strips those before calling us. Each hunk is located by
+    searching the base file for its declared context (not by trusting the
+    `@@ -A,B @@` line number, which LLM-generated diffs frequently get wrong).
+    A failed context search raises ValueError so the caller can retry.
     """
     base_text = _normalize_newlines(base_text)
     diff_body = _normalize_newlines(diff_body)
     base_lines = base_text.split("\n")
-    # Track index in base_lines as we walk hunks; hunks are 1-indexed in the header.
     out: List[str] = []
     cursor = 0  # 0-indexed pointer into base_lines
 
@@ -100,28 +154,17 @@ def apply_unified_diff(base_text: str, diff_body: str) -> str:
         raise ValueError("patch body contained no @@ hunks")
 
     for orig_start, _orig_count, hunk_lines in hunks:
-        target_idx = orig_start - 1  # convert 1-indexed to 0-indexed
-        if orig_start == 0:
-            target_idx = 0  # BOF insertion: @@ -0,0 +1,N @@
-        if target_idx < cursor:
-            raise ValueError(
-                f"hunks out of order: hunk starts at line {orig_start} but "
-                f"cursor already at line {cursor + 1}"
-            )
-        if target_idx > len(base_lines):
-            raise ValueError(
-                f"hunk start line {orig_start} exceeds base file length "
-                f"{len(base_lines)}"
-            )
-        # Copy unchanged lines between previous hunk and this one.
+        hint_idx = max(0, orig_start - 1)  # convert 1-indexed to 0-indexed
+        target_idx = _locate_hunk_by_context(
+            base_lines, hunk_lines, hint_idx, min_cursor=cursor
+        )
+        # Copy unchanged lines between previous hunk end and this hunk start.
         out.extend(base_lines[cursor:target_idx])
         cursor = target_idx
         for hl in hunk_lines:
             if hl.startswith("\\ "):
-                # "\\ No newline at end of file" marker — tolerate.
                 continue
             if hl == "":
-                # Blank physical line in diff body — treat as context blank line.
                 tag, body = " ", ""
             else:
                 tag, body = hl[0], hl[1:]
@@ -147,7 +190,6 @@ def apply_unified_diff(base_text: str, diff_body: str) -> str:
             else:
                 raise ValueError(f"unknown diff line prefix: {hl!r}")
 
-    # Append remainder of base after the last hunk.
     out.extend(base_lines[cursor:])
     return _join_lines(out)
 

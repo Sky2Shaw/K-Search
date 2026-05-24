@@ -100,7 +100,7 @@ Rules:
 - Implement ONLY the chosen action; keep everything else as close as possible to the base implementation.
 - Preserve operator semantics, host tiling contract, public entry points, and correctness harness behavior.
 - Treat Host tiling, TilingData, blockDim, workspace, TPipe/TQue/TBuf, DataCopy/DataCopyPad, UB/L1/L0, AIC/AIV, Matmul API, tail handling, and alignment as first-class performance surfaces.
-- Return only the full updated AscendC multi-file container (no explanations, no markdown).
+- Return only what the `code_format` block below specifies (no explanations, no markdown).
 
 {code_format}
 
@@ -246,7 +246,7 @@ Rules:
 - If the current implementation PASSED: improve measured latency while preserving correctness.
 - Keep changes minimal; do not introduce unrelated rewrites.
 - Keep the implementation aligned with the base and the chosen action intent.
-- Return only the full corrected AscendC multi-file container (no explanations, no markdown).
+- Return only what the `code_format` block below specifies (no explanations, no markdown).
 
 {code_format}
 
@@ -376,7 +376,7 @@ Rules:
 - If the current implementation FAILED: fix compile/runtime/correctness issues FIRST.
 - If the current implementation PASSED: improve measured latency while preserving correctness.
 - Keep changes minimal; do not introduce unrelated rewrites.
-- Return only the full corrected AscendC multi-file container (no explanations, no markdown).
+- Return only what the `code_format` block below specifies (no explanations, no markdown).
 
 {code_format}
 
