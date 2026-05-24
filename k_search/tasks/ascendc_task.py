@@ -370,6 +370,12 @@ Generate the corrected and optimized implementation:"""
         if isinstance(raw, dict):
             return format_ascendc_project_files({str(k): str(v or "") for k, v in raw.items()})
         text = str(raw or "")
+        # Idempotency: when preview_parse_generated_code has already processed
+        # this exact raw text, `_last_parsed_files` holds the post-patch state.
+        # Re-applying the patch here would mismatch context against the advanced
+        # baseline and silently degrade the WM excerpt to raw diff syntax.
+        if self._last_parsed_raw == text and self._last_parsed_files is not None:
+            return format_ascendc_project_files(self._last_parsed_files)
         if "<ascendc_patch>" in text or "<patch " in text:
             try:
                 base_files = self._resolve_patch_base_files()

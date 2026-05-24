@@ -392,3 +392,35 @@ def test_kernel_generator_retries_ascendc_on_bad_patch_then_succeeds(tmp_path, m
     )
     foo = next(s for s in sol.sources if s.path == "kernel/foo.h")
     assert "BETA" in foo.content
+
+
+def test_code_for_world_model_from_raw_returns_applied_code_after_preview_parse(tmp_path):
+    """After preview_parse_generated_code processes a patch, code_for_world_model_from_raw
+    on the same raw text must NOT re-apply the patch (which would silently fail because
+    the cached baseline has advanced) — it must return the post-patch <ascendc_project>
+    container so the world model sees expanded code, not diff syntax.
+    """
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir()
+    (kernel_dir / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=tmp_path, definition_name="x", codegen_mode="patch")
+
+    raw_patch = (
+        "<ascendc_patch>\n"
+        '<patch path="kernel/foo.h">\n'
+        "@@ -1,3 +1,3 @@\n"
+        " alpha\n"
+        "-beta\n"
+        "+BETA\n"
+        " gamma\n"
+        "</patch>\n"
+        "</ascendc_patch>\n"
+    )
+    # Step 1: retry-framework path — preview parses the patch and caches the result.
+    task.preview_parse_generated_code(raw_code=raw_patch)
+    # Step 2: WM loop path — same raw text fed to code_for_world_model_from_raw.
+    wm_excerpt = task.code_for_world_model_from_raw(raw=raw_patch, language="ascendc")
+    # The excerpt must be the applied result rendered as <ascendc_project>, NOT raw diff.
+    assert "<ascendc_project>" in wm_excerpt
+    assert "<ascendc_patch>" not in wm_excerpt
+    assert "BETA" in wm_excerpt
