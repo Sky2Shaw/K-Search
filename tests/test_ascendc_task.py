@@ -263,6 +263,30 @@ def test_get_baseline_code_for_codegen_formats_disk_project(tmp_path):
     assert "int a = 1;" in baseline_code
 
 
+def test_world_model_codegen_definition_omits_sources_and_format_when_base_is_explicit(tmp_path):
+    from k_search.kernel_generators.kernel_generator_world_model import (
+        _definition_text_for_codegen_prompt,
+    )
+
+    (tmp_path / "spec.md").write_text("Vector add spec.", encoding="utf-8")
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir()
+    (kernel_dir / "foo.h").write_text("int duplicated_source = 1;\n", encoding="utf-8")
+    task = AscendCTask(task_path=tmp_path, definition_name="x", codegen_mode="patch")
+
+    definition_text = _definition_text_for_codegen_prompt(
+        task,
+        language="ascendc",
+        has_explicit_base_code=True,
+    )
+
+    assert "Vector add spec." in definition_text
+    assert "Existing project source excerpts" not in definition_text
+    assert "int duplicated_source" not in definition_text
+    assert "<ascendc_project>" not in definition_text
+    assert "<ascendc_patch>" not in definition_text
+
+
 def test_make_solution_accepts_patch_response_against_disk_baseline(tmp_path):
     kernel_dir = tmp_path / "kernel"
     kernel_dir.mkdir()
@@ -343,7 +367,7 @@ def test_make_solution_records_patch_failure_streak_and_auto_falls_back(tmp_path
     assert task._patch_failure_streak >= 3
 
 
-def test_kernel_generator_retries_ascendc_on_bad_patch_then_succeeds(tmp_path, monkeypatch):
+def test_kernel_generator_retries_ascendc_on_bad_patch_then_succeeds(tmp_path, monkeypatch, capsys):
     """A flaky LLM that returns a bad patch on attempt 1 and a good one on attempt 2
     should produce a parseable solution thanks to the widened retry framework.
     """
@@ -392,6 +416,13 @@ def test_kernel_generator_retries_ascendc_on_bad_patch_then_succeeds(tmp_path, m
         llm_client=FlakyClient(),
     )
     result = gen._generate_code_from_prompt("ignored prompt", task=task)
+    output = capsys.readouterr().out
+    assert "[LLM] codegen request" in output
+    assert "language=ascendc" in output
+    assert "attempt=1/5" in output
+    assert "prompt_chars=14" in output
+    assert "[WARN] AscendC parse failed" in output
+    assert "error_type=ValueError" in output
     assert "BETA" in result["raw"]
     # Calling make_solution_from_generated_code with the same raw must NOT re-fail
     # (idempotency cache).
@@ -405,6 +436,39 @@ def test_kernel_generator_retries_ascendc_on_bad_patch_then_succeeds(tmp_path, m
     )
     foo = next(s for s in sol.sources if s.path == "kernel/foo.h")
     assert "BETA" in foo.content
+
+
+def test_kernel_generator_does_not_retry_ascendc_provider_timeout(tmp_path, capsys):
+    from k_search.kernel_generators.kernel_generator import KernelGenerator
+
+    task = AscendCTask(task_path=tmp_path, definition_name="x", codegen_mode="patch")
+
+    class TimeoutClient:
+        def __init__(self):
+            self.calls = 0
+
+        def generate(self, prompt):
+            self.calls += 1
+            raise TimeoutError("Claude Agent SDK provider timed out after 1200s")
+
+    client = TimeoutClient()
+    gen = KernelGenerator(
+        model_name="fake",
+        language="ascendc",
+        target_gpu="ascend_910b",
+        llm_client=client,
+    )
+
+    with pytest.raises(TimeoutError, match="timed out after 1200s"):
+        gen._generate_code_from_prompt("ignored prompt", task=task)
+    output = capsys.readouterr().out
+    assert "[LLM] codegen request" in output
+    assert "language=ascendc" in output
+    assert "attempt=1/5" in output
+    assert "prompt_chars=14" in output
+    assert "[ERROR] LLM codegen timeout" in output
+    assert "error_type=TimeoutError" in output
+    assert client.calls == 1
 
 
 def test_code_for_world_model_from_raw_returns_applied_code_after_preview_parse(tmp_path):

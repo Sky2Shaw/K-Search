@@ -37,6 +37,39 @@ from k_search.utils.solution_db import SolutionDB
 from k_search.utils.paths import get_ksearch_artifacts_dir
 
 
+def _definition_text_for_codegen_prompt(
+    task: Any,
+    *,
+    language: str,
+    has_explicit_base_code: bool,
+) -> str:
+    """Return task definition text sized for codegen prompts.
+
+    AscendC action/debug prompts already carry the explicit base/current code
+    and response format. When the task can provide a spec-only variant, use it
+    to avoid duplicating project sources and conflicting format instructions.
+    """
+    get_def = getattr(task, "get_definition_text", None)
+    if not callable(get_def):
+        raise RuntimeError(
+            f"Task '{getattr(task, 'name', '')}' does not provide get_definition_text(); "
+            "cannot build world-model prompts without a definition."
+        )
+
+    if has_explicit_base_code:
+        try:
+            text = get_def(
+                language=str(language),
+                include_sources=False,
+                include_format=False,
+            )
+            return str(text or "").strip()
+        except TypeError:
+            pass
+
+    return str(get_def(language=str(language)) or "").strip()
+
+
 class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
     """Baseline-aware generator variant that maintains and injects a persistent world model."""
 
@@ -556,18 +589,28 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                     # If the action's parent has an attached solution (including root when continuing),
                     # start from that base_code; otherwise fall back to spec+action.
                     if isinstance(base_raw_code, str) and base_raw_code.strip():
+                        codegen_definition_text = _definition_text_for_codegen_prompt(
+                            task,
+                            language=str(self.language),
+                            has_explicit_base_code=True,
+                        )
                         prompt = get_generate_code_from_action_prompt_from_text(
                             self.language,
-                            definition_text=definition_text,
+                            definition_text=codegen_definition_text,
                             base_code=base_raw_code,
                             action_text=chosen_action_text,
                             code_format=_code_format_text(),
                             target_gpu=self.target_gpu,
                         )
                     else:
+                        codegen_definition_text = _definition_text_for_codegen_prompt(
+                            task,
+                            language=str(self.language),
+                            has_explicit_base_code=False,
+                        )
                         prompt = get_generate_code_from_spec_with_action_prompt_from_text(
                             self.language,
-                            definition_text=definition_text,
+                            definition_text=codegen_definition_text,
                             action_text=chosen_action_text,
                             code_format=_code_format_text(),
                             target_gpu=self.target_gpu,
@@ -601,10 +644,18 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         if base_perf_eval is not None:
                             perf_summary_lines.extend(base_perf_eval.perf_summary_lines(prefix="base"))
                         perf_summary = "\n".join(perf_summary_lines).strip()
+                        codegen_definition_text = _definition_text_for_codegen_prompt(
+                            task,
+                            language=str(self.language),
+                            has_explicit_base_code=bool(
+                                str(base_for_debug or "").strip()
+                                and not str(base_for_debug).startswith("(no base code")
+                            ),
+                        )
                         if not has_passed_in_cycle:
                             prompt = get_debug_and_improve_from_spec_prompt_from_text(
                                 self.language,
-                                definition_text=definition_text,
+                                definition_text=codegen_definition_text,
                                 trace_logs=str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or ""),
                                 current_code=str(current_raw_code or ""),
                                 action_text=str(chosen_action_text or ""),
@@ -618,7 +669,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         else:
                             prompt = get_improve_from_spec_prompt_from_text(
                                 self.language,
-                                definition_text=definition_text,
+                                definition_text=codegen_definition_text,
                                 trace_logs=str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or ""),
                                 current_code=str(current_raw_code or ""),
                                 code_format=_code_format_text(),
@@ -652,10 +703,15 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         if base_perf_eval is not None:
                             perf_summary_lines.extend(base_perf_eval.perf_summary_lines(prefix="base"))
                         perf_summary = "\n".join(perf_summary_lines).strip()
+                        codegen_definition_text = _definition_text_for_codegen_prompt(
+                            task,
+                            language=str(self.language),
+                            has_explicit_base_code=bool(str(base_for_debug or "").strip()),
+                        )
                         if not has_passed_in_cycle:
                             prompt = get_debug_generated_code_prompt_from_text(
                                 self.language,
-                                definition_text=definition_text,
+                                definition_text=codegen_definition_text,
                                 trace_logs=str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or ""),
                                 base_code=base_for_debug,
                                 buggy_code=str(current_raw_code or ""),
@@ -669,7 +725,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         else:
                             prompt = get_improve_generated_code_prompt_from_text(
                                 self.language,
-                                definition_text=definition_text,
+                                definition_text=codegen_definition_text,
                                 trace_logs=str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or ""),
                                 base_code=base_for_debug,
                                 current_code=str(current_raw_code or ""),
@@ -910,4 +966,3 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         if last_solution is not None:
             return last_solution
         raise ValueError(f"[{task.name}] No solution was generated (best_solution and last_solution are None).")
-

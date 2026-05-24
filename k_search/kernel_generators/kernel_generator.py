@@ -153,10 +153,32 @@ class KernelGenerator:
         should_retry = is_cuda or is_ascendc
 
         last_err: Exception | None = None
-        for attempt in range(1, (max_parse_retries if should_retry else 1) + 1):
+        max_attempts = max_parse_retries if should_retry else 1
+        prompt_chars = 0
+        prompt_lines = 0
+
+        def _line_count(text: str) -> int:
+            return (text.count("\n") + 1) if text else 0
+
+        for attempt in range(1, max_attempts + 1):
             try:
                 effective_prompt = prompt
+                prompt_text = str(effective_prompt or "")
+                prompt_chars = len(prompt_text)
+                prompt_lines = _line_count(prompt_text)
+                print(
+                    f"[LLM] codegen request provider={self.llm_provider} model={self.model_name} "
+                    f"language={lang or self.language} attempt={attempt}/{max_attempts} "
+                    f"prompt_chars={prompt_chars} prompt_lines={prompt_lines}",
+                    flush=True,
+                )
                 generated_code = str(self.llm_client.generate(effective_prompt) or "").strip()
+                print(
+                    f"[LLM] codegen response provider={self.llm_provider} model={self.model_name} "
+                    f"language={lang or self.language} attempt={attempt}/{max_attempts} "
+                    f"raw_chars={len(generated_code)} raw_lines={_line_count(generated_code)}",
+                    flush=True,
+                )
 
                 cleaned_code = self._clean_generated_code(generated_code)
 
@@ -173,15 +195,34 @@ class KernelGenerator:
                     if callable(preview):
                         preview(raw_code=generated_code)
 
+                print(
+                    f"[LLM] codegen parse ok language={lang or self.language} "
+                    f"attempt={attempt}/{max_attempts} cleaned_type={type(cleaned_code).__name__}",
+                    flush=True,
+                )
                 return {"raw": generated_code, "cleaned": cleaned_code}
 
             except Exception as e:
                 last_err = e
+                err_type = type(e).__name__
+                if isinstance(e, TimeoutError):
+                    print(
+                        f"[ERROR] LLM codegen timeout language={lang or self.language} "
+                        f"attempt={attempt}/{max_attempts} prompt_chars={prompt_chars} "
+                        f"prompt_lines={prompt_lines} error_type={err_type}: {e}",
+                        flush=True,
+                    )
+                    raise
                 if should_retry and attempt < max_parse_retries:
                     tag = "CUDA XML" if is_cuda else "AscendC"
-                    print(f"[WARN] {tag} parse failed ({e}); retrying generation ({attempt}/{max_parse_retries})...")
+                    print(
+                        f"[WARN] {tag} parse failed error_type={err_type} "
+                        f"attempt={attempt}/{max_parse_retries} prompt_chars={prompt_chars} "
+                        f"prompt_lines={prompt_lines} ({e}); retrying generation ({attempt}/{max_parse_retries})...",
+                        flush=True,
+                    )
                     continue
-                print(f"Error while generating code: {e}")
+                print(f"Error while generating code: error_type={err_type}: {e}", flush=True)
                 raise
 
         assert last_err is not None

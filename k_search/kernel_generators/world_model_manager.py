@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from k_search.tasks.task_base import EvalResult
@@ -182,8 +184,24 @@ class WorldModelManager:
             prediction=None,
             max_chars_per_block=self._cfg.max_chars_per_block,
         )
-        raw = (self._llm_call(prompts.init_prompt) or "").strip()
+        init_error: str | None = None
+        try:
+            raw = (self._llm_call(prompts.init_prompt) or "").strip()
+        except Exception as exc:
+            init_error = f"{type(exc).__name__}: {str(exc)}"
+            raw = ""
         parsed = try_parse_world_model_json(raw)
+        if not parsed:
+            parsed = self._recover_agent_written_world_model(
+                response_text=raw,
+                definition_text=definition_text,
+            )
+        if not parsed:
+            parsed = self._build_fallback_initial_world_model(
+                definition_name=name,
+                definition_text=definition_text,
+                init_error=init_error,
+            )
         if parsed:
             # Persist a bounded excerpt of the reference implementation into the root node's notes.
             # Root stays a dummy decision/choice=null node; this is just a stable "anchor" for humans and WM.
@@ -226,6 +244,238 @@ class WorldModelManager:
             self.set(name, parsed)
             return parsed
         return None
+
+    def _recover_agent_written_world_model(
+        self, *, response_text: str, definition_text: str
+    ) -> Optional[str]:
+        """
+        Claude Agent may satisfy the prompt by writing a local world_model.json and
+        returning prose. Recover that file instead of treating init as empty.
+        """
+        for path in self._candidate_world_model_paths(
+            response_text=response_text,
+            definition_text=definition_text,
+        ):
+            try:
+                if path.name != "world_model.json":
+                    continue
+                if not path.exists() or not path.is_file():
+                    continue
+                if path.stat().st_size > 2_000_000:
+                    continue
+                parsed = try_parse_world_model_json(path.read_text(encoding="utf-8", errors="replace"))
+                if parsed:
+                    return parsed
+            except Exception:
+                continue
+        return None
+
+    def _candidate_world_model_paths(
+        self, *, response_text: str, definition_text: str
+    ) -> list[Path]:
+        seen: set[str] = set()
+        out: list[Path] = []
+
+        def add(raw: object) -> None:
+            s = str(raw or "").strip().strip("`'\".,;:)")
+            if not s or "world_model.json" not in s:
+                return
+            try:
+                p = Path(s).expanduser()
+                if not p.is_absolute():
+                    p = p.resolve()
+                key = str(p)
+            except Exception:
+                return
+            if key in seen:
+                return
+            seen.add(key)
+            out.append(p)
+
+        text = str(response_text or "")
+        for match in re.finditer(r"`([^`]*world_model\.json)`", text):
+            add(match.group(1))
+        for match in re.finditer(r"(/[^\s`'\"]*world_model\.json)", text):
+            add(match.group(1))
+
+        if "world_model.json" in text or "world model" in text.lower():
+            for line in str(definition_text or "").splitlines():
+                if "Specification source:" not in line:
+                    continue
+                source = line.split("Specification source:", 1)[1].strip()
+                if not source:
+                    continue
+                try:
+                    add(str(Path(source).expanduser().resolve().parent / "world_model.json"))
+                except Exception:
+                    continue
+        return out
+
+    def _build_fallback_initial_world_model(
+        self, *, definition_name: str, definition_text: str, init_error: str | None = None
+    ) -> str:
+        """
+        Deterministic seed used only when the LLM neither returns JSON nor writes a
+        recoverable file. It keeps the search executable and makes the degraded
+        state visible in root notes.
+        """
+        name = str(definition_name or "kernel").strip() or "kernel"
+        spec_lines = [
+            line.strip()
+            for line in str(definition_text or "").splitlines()
+            if line.strip()
+        ]
+        spec_hint = spec_lines[0] if spec_lines else name
+        reason = "LLM init did not return parseable world-model JSON."
+        if init_error:
+            reason = f"LLM init failed ({str(init_error)[:320]})."
+        root_notes = (
+            f"Fallback WM seed: {reason} "
+            "Seeded conservative executable actions so search can continue. "
+            f"Spec hint: {spec_hint[:240]}"
+        )
+
+        def impact(memory: float, reg: float, compute: float) -> dict[str, dict[str, Any]]:
+            return {
+                "memory_bandwidth": {
+                    "rating_0_to_10": memory,
+                    "risk": "May not target the true bottleneck until benchmark evidence is available.",
+                    "notes": "Use evaluation feedback to revise this prior after the first candidate.",
+                },
+                "register_pressure": {
+                    "rating_0_to_10": reg,
+                    "risk": "Buffer changes can increase local memory pressure.",
+                    "notes": "Keep the first action small and preserve existing resource bounds.",
+                },
+                "compute_intensity_and_hw_fit": {
+                    "rating_0_to_10": compute,
+                    "risk": "Hardware fit is estimated from the task spec, not profiler evidence.",
+                    "notes": "Prefer changes compatible with the existing launch and tiling contract.",
+                    "hw_notes": f"Target GPU: {self._target_gpu}; language: {self._language}.",
+                },
+            }
+
+        obj = {
+            "kernel_summary": (
+                f"{name}: fallback world model initialized after {reason.lower()} "
+                "The seed actions are conservative priors and should be refined using compile, correctness, and latency feedback."
+            ),
+            "open_questions": [
+                "Which loop or pipeline stage dominates latency on the benchmark shapes?",
+                "Which data movement is repeated and can be safely reused without changing semantics?",
+                "Which synchronization or boundary-handling path is most expensive in failing or slow traces?",
+            ],
+            "decision_tree": {
+                "root_id": "root",
+                "active_leaf_id": "root",
+                "nodes": [
+                    {
+                        "node_id": "root",
+                        "parent_id": None,
+                        "node_type": "root",
+                        "decision": None,
+                        "choice": None,
+                        "notes": root_notes,
+                        "overall_rating_0_to_10": 5.0,
+                        "confidence_0_to_1": 0.35,
+                        "last_updated_round": 0,
+                        "solution_ref": {
+                            "solution_id": None,
+                            "parent_solution_id": None,
+                            "eval": {"status": ""},
+                        },
+                        "action": {
+                            "title": "",
+                            "description": "",
+                            "rationale": "",
+                            "score_0_to_1": 0.0,
+                            "difficulty_1_to_5": 1,
+                            "expected_vs_baseline_factor": None,
+                        },
+                        "impacts": impact(5.0, 5.0, 5.0),
+                    },
+                    {
+                        "node_id": "n1",
+                        "parent_id": "root",
+                        "node_type": "action",
+                        "decision": "Data reuse",
+                        "choice": "Reduce repeated global reads in the dominant loop.",
+                        "notes": "SELF_CHECK: This action targets memory reuse first; sibling actions target synchronization or boundary/launch behavior.",
+                        "overall_rating_0_to_10": 6.5,
+                        "confidence_0_to_1": 0.45,
+                        "last_updated_round": 0,
+                        "solution_ref": {
+                            "solution_id": None,
+                            "parent_solution_id": None,
+                            "eval": {"status": ""},
+                        },
+                        "action": {
+                            "title": "Improve data reuse in the dominant loop",
+                            "description": "Identify one repeated input load or intermediate write-read path and cache, tile, or reorder it within the existing correctness contract.",
+                            "rationale": "Most kernel optimizations first win by reducing unnecessary data movement while preserving the algorithm.",
+                            "score_0_to_1": 0.65,
+                            "difficulty_1_to_5": 3,
+                            "expected_vs_baseline_factor": 1.1,
+                        },
+                        "impacts": impact(7.0, 5.0, 5.5),
+                    },
+                    {
+                        "node_id": "n2",
+                        "parent_id": "root",
+                        "node_type": "action",
+                        "decision": "Pipeline cleanup",
+                        "choice": "Reduce avoidable synchronization or serialized pipeline work.",
+                        "notes": "SELF_CHECK: This action targets scheduling/synchronization first; sibling actions target memory reuse or boundary/launch behavior.",
+                        "overall_rating_0_to_10": 6.0,
+                        "confidence_0_to_1": 0.4,
+                        "last_updated_round": 0,
+                        "solution_ref": {
+                            "solution_id": None,
+                            "parent_solution_id": None,
+                            "eval": {"status": ""},
+                        },
+                        "action": {
+                            "title": "Reduce synchronization and pipeline stalls",
+                            "description": "Replace one broad barrier or serialized stage with the narrowest equivalent ordering already supported by the code structure.",
+                            "rationale": "Pipeline stalls often cost latency even when arithmetic and memory traffic are unchanged.",
+                            "score_0_to_1": 0.6,
+                            "difficulty_1_to_5": 2,
+                            "expected_vs_baseline_factor": 1.05,
+                        },
+                        "impacts": impact(5.0, 5.5, 6.5),
+                    },
+                    {
+                        "node_id": "n3",
+                        "parent_id": "root",
+                        "node_type": "action",
+                        "decision": "Shape robustness",
+                        "choice": "Improve launch, tiling, or boundary handling for the listed workload regimes.",
+                        "notes": "SELF_CHECK: This action targets shape coverage and scheduling first; sibling actions target memory reuse or synchronization.",
+                        "overall_rating_0_to_10": 5.5,
+                        "confidence_0_to_1": 0.4,
+                        "last_updated_round": 0,
+                        "solution_ref": {
+                            "solution_id": None,
+                            "parent_solution_id": None,
+                            "eval": {"status": ""},
+                        },
+                        "action": {
+                            "title": "Specialize boundary handling and launch sizing",
+                            "description": "Make one small adjustment to runtime tiling, core usage, or tail handling for the benchmark shape regimes without changing tensor semantics.",
+                            "rationale": "Incorrect or inefficient edge handling can dominate small or tail-heavy workloads.",
+                            "score_0_to_1": 0.55,
+                            "difficulty_1_to_5": 2,
+                            "expected_vs_baseline_factor": 1.03,
+                        },
+                        "impacts": impact(5.5, 4.5, 6.0),
+                    },
+                ],
+            },
+            "stagnation_count": 0,
+            "stagnation_count_vs_base": 0,
+            "world_model_active": True,
+        }
+        return dump_world_model_obj(obj)
 
     def _maybe_embed_reference_into_root_notes_from_text(
         self, *, reference_text: str, world_model_json: str
@@ -2194,4 +2444,3 @@ class WorldModelManager:
         updated = dump_world_model_obj(obj)
         self.set(str(definition_name), updated)
         return mapping
-

@@ -224,7 +224,13 @@ class AscendCTask:
     def name(self) -> str:
         return self._name
 
-    def get_definition_text(self, language: str | None = None) -> str:
+    def get_definition_text(
+        self,
+        language: str | None = None,
+        *,
+        include_sources: bool = True,
+        include_format: bool = True,
+    ) -> str:
         task_path = self.task_path
         spec_text = ""
         spec_path: Path | None = None
@@ -255,7 +261,7 @@ class AscendCTask:
                 ]
             )
 
-        if task_path and task_path.is_dir():
+        if include_sources and task_path and task_path.is_dir():
             sources = _collect_project_sources(task_path, max_files=20, max_bytes_per_file=40_000)
             if sources:
                 lines.append("\nExisting project source excerpts:")
@@ -265,7 +271,8 @@ class AscendCTask:
                         content = content[:4000] + "\n...<truncated>..."
                     lines.append(f"\n--- {src.path} ---\n{content}")
 
-        lines.extend(["", ASCENDC_CODE_FORMAT_TEXT])
+        if include_format:
+            lines.extend(["", ASCENDC_CODE_FORMAT_TEXT])
         return "\n".join(lines).strip()
 
     def get_generation_prompt(self, *, language: str, target_gpu: str) -> str:

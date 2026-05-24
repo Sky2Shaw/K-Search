@@ -371,6 +371,17 @@ def _extract_json_object(text: str) -> Optional[dict[str, Any]]:
     return objects[0] if objects else None
 
 
+def _looks_like_world_model_obj(obj: dict[str, Any]) -> bool:
+    """Return True only for objects that contain the world-model tree shape."""
+    if not isinstance(obj, dict):
+        return False
+    dtree = obj.get("decision_tree")
+    if not isinstance(dtree, dict):
+        return False
+    nodes = dtree.get("nodes")
+    return isinstance(nodes, (list, dict))
+
+
 def load_world_model_obj(world_model_json: str) -> Optional[dict[str, Any]]:
     """Parse + normalize a world model JSON string into a Python dict."""
     obj = _extract_json_object(world_model_json or "")
@@ -1417,14 +1428,15 @@ def _normalize_world_model_obj(obj: dict[str, Any]) -> dict[str, Any]:
 
 
 def try_parse_world_model_json(text: str) -> Optional[str]:
-    obj = _extract_json_object(text or "")
-    if obj is None:
-        return None
-    obj = _normalize_world_model_obj(obj)
-    try:
-        return json.dumps(obj, indent=2, sort_keys=True)
-    except Exception:
-        return None
+    for obj in _extract_json_objects(text or ""):
+        if not _looks_like_world_model_obj(obj):
+            continue
+        obj = _normalize_world_model_obj(obj)
+        try:
+            return json.dumps(obj, indent=2, sort_keys=True)
+        except Exception:
+            return None
+    return None
 
 
 def merge_computed_signals(
