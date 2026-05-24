@@ -2,12 +2,59 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal, Optional, Protocol
 
 
 LLMProvider = Literal["openai", "claude-agent"]
+
+
+# ---------------------------------------------------------------------------
+# LLM interaction logging (prompt + response)
+# ---------------------------------------------------------------------------
+_log_counter = 0
+
+
+def _log_llm_interaction(*, provider: str, model_name: str, prompt: str, response: str, error: str | None = None) -> None:
+    """Persist every prompt/response pair to disk for deterministic debugging."""
+    global _log_counter
+    _log_counter += 1
+
+    # Allow caller to override via env; fall back to a project-local default.
+    log_dir = Path(
+        os.getenv("KSEARCH_LLM_LOG_DIR")
+        or os.path.join(os.getcwd(), ".ksearch-output-mqa", "llm_logs")
+    ).expanduser().resolve()
+
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return  # Silently skip if we can't create the directory.
+
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    safe_model = "".join(c if c.isalnum() or c in "-_" else "_" for c in model_name)[:48]
+    filename = f"{ts}_{_log_counter:04d}_{provider}_{safe_model}.json"
+    path = log_dir / filename
+
+    payload = {
+        "timestamp_utc": ts,
+        "provider": provider,
+        "model_name": model_name,
+        "prompt": str(prompt or ""),
+        "response": str(response or ""),
+    }
+    if error is not None:
+        payload["error"] = error
+
+    try:
+        import json
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass  # Logging must never break the caller.
 
 
 class LLMClient(Protocol):
@@ -58,21 +105,29 @@ class OpenAICompatibleLLMClient:
         self.client = openai_mod.OpenAI(**client_kwargs)
 
     def generate(self, prompt: str) -> str:
-        if self.model_name.startswith("gpt-5") or self.model_name.startswith("o3"):
-            response = self.client.responses.create(
-                model=self.model_name,
-                input=prompt,
-                reasoning={"effort": self.reasoning_effort},
+        try:
+            if self.model_name.startswith("gpt-5") or self.model_name.startswith("o3"):
+                response = self.client.responses.create(
+                    model=self.model_name,
+                    input=prompt,
+                    reasoning={"effort": self.reasoning_effort},
+                )
+                result = str(getattr(response, "output_text", "") or "").strip()
+            else:
+                response = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                choice0 = response.choices[0] if getattr(response, "choices", None) else None
+                message = getattr(choice0, "message", None)
+                result = str(getattr(message, "content", "") or "").strip()
+            _log_llm_interaction(provider="openai", model_name=self.model_name, prompt=prompt, response=result)
+            return result
+        except Exception as exc:
+            _log_llm_interaction(
+                provider="openai", model_name=self.model_name, prompt=prompt, response="", error=str(exc)
             )
-            return str(getattr(response, "output_text", "") or "").strip()
-
-        response = self.client.chat.completions.create(
-            model=self.model_name,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        choice0 = response.choices[0] if getattr(response, "choices", None) else None
-        message = getattr(choice0, "message", None)
-        return str(getattr(message, "content", "") or "").strip()
+            raise
 
 
 def _default_claude_agent_max_turns() -> Optional[int]:
@@ -97,17 +152,46 @@ def _default_claude_agent_thinking_enabled() -> bool:
     return False
 
 
+def _default_claude_agent_timeout_seconds() -> float:
+    for name in ("KSEARCH_LLM_TIMEOUT_SECONDS", "CLAUDE_AGENT_TIMEOUT_SECONDS"):
+        raw = os.getenv(name)
+        if raw is None or not str(raw).strip():
+            continue
+        try:
+            value = float(str(raw).strip())
+        except ValueError:
+            continue
+        if value > 0:
+            return value
+
+    raw_ms = os.getenv("API_TIMEOUT_MS")
+    if raw_ms is not None and str(raw_ms).strip():
+        try:
+            value_ms = float(str(raw_ms).strip())
+        except ValueError:
+            value_ms = 0.0
+        if value_ms > 0:
+            return value_ms / 1000.0
+
+    return 600.0
+
+
 @dataclass
 class ClaudeAgentLLMClient:
     model_name: str
     max_turns: Optional[int] = field(default_factory=_default_claude_agent_max_turns)
     allowed_tools: list[str] = field(default_factory=list)
+    disallowed_tools: list[str] = field(default_factory=lambda: ["Bash"])
     thinking_enabled: bool = field(default_factory=_default_claude_agent_thinking_enabled)
+    timeout_seconds: float = field(default_factory=_default_claude_agent_timeout_seconds)
 
     def generate(self, prompt: str) -> str:
         try:
             import claude_agent_sdk  # type: ignore
         except ImportError as exc:
+            _log_llm_interaction(
+                provider="claude-agent", model_name=self.model_name, prompt=prompt, response="", error=str(exc)
+            )
             raise RuntimeError(
                 "Claude Agent SDK provider requires the 'claude-agent-sdk' package. "
                 "Install it with: pip install claude-agent-sdk"
@@ -117,6 +201,7 @@ class ClaudeAgentLLMClient:
             options_kwargs: dict[str, Any] = {
                 "model": self.model_name,
                 "allowed_tools": list(self.allowed_tools),
+                "disallowed_tools": list(self.disallowed_tools),
                 "permission_mode": "bypassPermissions",
             }
             if self.max_turns is not None:
@@ -146,20 +231,62 @@ class ClaudeAgentLLMClient:
                 raise RuntimeError("Claude Agent SDK returned empty text")
             return result
 
-        return self._run_async(_run_query)
+        try:
+            result = self._run_async(_run_query)
+            _log_llm_interaction(provider="claude-agent", model_name=self.model_name, prompt=prompt, response=result)
+            return result
+        except Exception as exc:
+            _log_llm_interaction(
+                provider="claude-agent", model_name=self.model_name, prompt=prompt, response="", error=str(exc)
+            )
+            raise
 
-    @staticmethod
-    def _run_async(coro_factory: Any) -> str:
+    def _run_async(self, coro_factory: Any) -> str:
+        timeout = float(self.timeout_seconds or 0)
+        started = time.monotonic()
+
+        async def _timed_run() -> str:
+            if timeout <= 0:
+                return await coro_factory()
+            return await asyncio.wait_for(coro_factory(), timeout=timeout)
+
+        def _timeout_error(exc: BaseException) -> TimeoutError:
+            return TimeoutError(
+                f"Claude Agent SDK provider timed out after {timeout:g}s. "
+                "Set KSEARCH_LLM_TIMEOUT_SECONDS or API_TIMEOUT_MS to adjust this limit."
+            )
+
+        def _looks_like_timeout_cancel(exc: BaseException) -> bool:
+            if timeout <= 0:
+                return False
+            elapsed = time.monotonic() - started
+            text = str(exc)
+            return elapsed >= (timeout * 0.9) and "exit code 143" in text
+
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            return asyncio.run(coro_factory())
+            try:
+                return asyncio.run(_timed_run())
+            except TimeoutError as exc:
+                raise _timeout_error(exc) from exc
+            except RuntimeError as exc:
+                if _looks_like_timeout_cancel(exc):
+                    raise _timeout_error(exc) from exc
+                raise
 
         def _runner() -> str:
-            return asyncio.run(coro_factory())
+            return asyncio.run(_timed_run())
 
         with ThreadPoolExecutor(max_workers=1) as executor:
-            return executor.submit(_runner).result()
+            try:
+                return executor.submit(_runner).result()
+            except TimeoutError as exc:
+                raise _timeout_error(exc) from exc
+            except RuntimeError as exc:
+                if _looks_like_timeout_cancel(exc):
+                    raise _timeout_error(exc) from exc
+                raise
 
     @staticmethod
     def _ensure_successful_result_message(message: Any) -> None:

@@ -486,6 +486,18 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                     recb = self._solution_db.get(sid)
                     if recb is not None and recb.code:
                         base_raw_code = recb.code
+            if not str(base_raw_code or "").strip():
+                get_baseline_code = getattr(task, "get_baseline_code_for_codegen", None)
+                if callable(get_baseline_code):
+                    try:
+                        base_raw_code = str(get_baseline_code(language=str(self.language)) or "").strip()
+                    except TypeError:
+                        try:
+                            base_raw_code = str(get_baseline_code() or "").strip()
+                        except Exception:
+                            base_raw_code = ""
+                    except Exception:
+                        base_raw_code = ""
 
             prediction = None
             try:
@@ -566,7 +578,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         # Reference base shown in prompts: prefer whichever is better by score (base_score vs cycle_best_score).
                         # If parent is root (no base score), fall back to cycle_best if present.
                         base_for_debug = "(no base code; start from spec)"
-                        if isinstance(base_raw_code, str) and base_raw_code.strip() and base_score > 0:
+                        if isinstance(base_raw_code, str) and base_raw_code.strip():
                             base_for_debug = base_raw_code
                         if (
                             isinstance(cycle_best_raw, str)
@@ -898,5 +910,4 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         if last_solution is not None:
             return last_solution
         raise ValueError(f"[{task.name}] No solution was generated (best_solution and last_solution are None).")
-
 

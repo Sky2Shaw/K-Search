@@ -250,6 +250,19 @@ def test_get_code_format_text_in_patch_mode_returns_patch_format(tmp_path):
     assert "<ascendc_patch>" in fmt
 
 
+def test_get_baseline_code_for_codegen_formats_disk_project(tmp_path):
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir()
+    (kernel_dir / "foo.h").write_text("int a = 1;\n", encoding="utf-8")
+    task = AscendCTask(task_path=tmp_path, definition_name="x", codegen_mode="patch")
+
+    baseline_code = task.get_baseline_code_for_codegen(language="ascendc")
+
+    assert "<ascendc_project>" in baseline_code
+    assert 'file path="kernel/foo.h"' in baseline_code
+    assert "int a = 1;" in baseline_code
+
+
 def test_make_solution_accepts_patch_response_against_disk_baseline(tmp_path):
     kernel_dir = tmp_path / "kernel"
     kernel_dir.mkdir()

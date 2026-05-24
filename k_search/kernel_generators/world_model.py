@@ -318,37 +318,30 @@ def render_world_model_status(
     return "\n".join(parts).strip()
 
 
-def _extract_json_object(text: str) -> Optional[dict[str, Any]]:
-    """Best-effort extraction of a JSON object from an arbitrary model response."""
+def _extract_json_objects(text: str) -> list[dict[str, Any]]:
+    """Best-effort extraction of JSON objects from an arbitrary model response."""
     if not text:
-        return None
+        return []
     s = text.strip()
-    # Fast path.
-    if s.startswith("{") and s.endswith("}"):
-        try:
-            obj = json.loads(s)
-            return obj if isinstance(obj, dict) else None
-        except Exception:
-            pass
-    # Best-effort: find outermost braces.
-    # More robust scan: find the first balanced {...} that parses as JSON.
+    objects: list[dict[str, Any]] = []
+
+    # Best-effort scan: find balanced {...} regions that parse as JSON.
     start = s.find("{")
-    if start == -1:
-        return None
-    depth = 0
-    in_str = False
-    esc = False
-    for i in range(start, len(s)):
-        ch = s[i]
-        if in_str:
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == '"':
-                in_str = False
-            continue
-        else:
+    while start != -1:
+        depth = 0
+        in_str = False
+        esc = False
+        next_start = -1
+        for i in range(start, len(s)):
+            ch = s[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
             if ch == '"':
                 in_str = True
                 continue
@@ -360,19 +353,22 @@ def _extract_json_object(text: str) -> Optional[dict[str, Any]]:
                     candidate = s[start : i + 1]
                     try:
                         obj = json.loads(candidate)
-                        return obj if isinstance(obj, dict) else None
+                        if isinstance(obj, dict):
+                            objects.append(obj)
+                        next_start = s.find("{", i + 1)
                     except Exception:
-                        # Keep searching: there may be another JSON object later.
-                        nxt = s.find("{", start + 1)
-                        if nxt == -1:
-                            return None
-                        start = nxt
-                        depth = 0
-                        in_str = False
-                        esc = False
-                        # Restart scan from the new start
-                        return _extract_json_object(s[start:])
-    return None
+                        next_start = s.find("{", start + 1)
+                    break
+        if next_start == -1:
+            break
+        start = next_start
+    return objects
+
+
+def _extract_json_object(text: str) -> Optional[dict[str, Any]]:
+    """Best-effort extraction of the first JSON object from an arbitrary model response."""
+    objects = _extract_json_objects(text)
+    return objects[0] if objects else None
 
 
 def load_world_model_obj(world_model_json: str) -> Optional[dict[str, Any]]:
@@ -1078,16 +1074,15 @@ def build_decision_tree_edit_prompt(
 
 
 def try_parse_decision_tree_edit_ops(text: str) -> Optional[DecisionTreeEditOps]:
-    obj = _extract_json_object(text or "")
-    if obj is None or not isinstance(obj, dict):
-        return None
-    ops = obj.get("ops")
-    if not isinstance(ops, list):
-        return None
-    active = obj.get("active_leaf_id")
-    active_s = str(active).strip() if isinstance(active, str) and active.strip() else None
-    # Keep ops as raw dicts; WorldModelManager will validate/apply.
-    return DecisionTreeEditOps(ops=ops, active_leaf_id=active_s, raw_model_output=(text or "").strip())
+    for obj in _extract_json_objects(text or ""):
+        ops = obj.get("ops")
+        if not isinstance(ops, list):
+            continue
+        active = obj.get("active_leaf_id")
+        active_s = str(active).strip() if isinstance(active, str) and active.strip() else None
+        # Keep ops as raw dicts; WorldModelManager will validate/apply.
+        return DecisionTreeEditOps(ops=ops, active_leaf_id=active_s, raw_model_output=(text or "").strip())
+    return None
 
 
 def _normalize_world_model_obj(obj: dict[str, Any]) -> dict[str, Any]:
@@ -1107,9 +1102,15 @@ def _normalize_world_model_obj(obj: dict[str, Any]) -> dict[str, Any]:
         obj["decision_tree"] = dtree
 
     root_id = str(dtree.get("root_id", "") or "").strip() or "root"
-    nodes = dtree.get("nodes")
-    if not isinstance(nodes, list):
-        nodes = []
+    raw_nodes = dtree.get("nodes")
+    node_entries: list[tuple[str, Any]] = []
+    if isinstance(raw_nodes, list):
+        node_entries = [(f"n{i}", n) for i, n in enumerate(raw_nodes)]
+    elif isinstance(raw_nodes, dict):
+        node_entries = [
+            (str(k).strip() or f"n{i}", n)
+            for i, (k, n) in enumerate(raw_nodes.items())
+        ]
     active_leaf_id = str(dtree.get("active_leaf_id", "") or "").strip() or root_id
 
     def _clamp_rating_10(x: Any) -> float:
@@ -1137,7 +1138,7 @@ def _normalize_world_model_obj(obj: dict[str, Any]) -> dict[str, Any]:
     def _normalize_node(n: dict[str, Any], *, fallback_id: str) -> Optional[dict[str, Any]]:
         if not isinstance(n, dict):
             return None
-        node_id = str(n.get("node_id", "") or "").strip() or fallback_id
+        node_id = str(n.get("node_id", n.get("id", "")) or "").strip() or fallback_id
         parent_id = n.get("parent_id", None)
         parent_id = None if parent_id is None else str(parent_id).strip() or None
         # Enforce a single dummy root node. If the model emits extra nodes with parent_id=null,
@@ -1262,9 +1263,9 @@ def _normalize_world_model_obj(obj: dict[str, Any]) -> dict[str, Any]:
         }
 
     norm_nodes: list[dict[str, Any]] = []
-    if nodes:
-        for i, n in enumerate(nodes):
-            nn = _normalize_node(n, fallback_id=f"n{i}")
+    if node_entries:
+        for fallback_id, n in node_entries:
+            nn = _normalize_node(n, fallback_id=fallback_id)
             if nn is not None:
                 norm_nodes.append(nn)
     else:
@@ -1381,6 +1382,8 @@ def _normalize_world_model_obj(obj: dict[str, Any]) -> dict[str, Any]:
     for n in norm_nodes:
         if n.get("parent_id") is not None and n["parent_id"] not in ids:
             n["parent_id"] = root_id
+
+    norm_nodes.sort(key=lambda n: 0 if n.get("node_id") == root_id else 1)
 
     if active_leaf_id not in ids:
         active_leaf_id = root_id
@@ -1799,5 +1802,3 @@ def render_action_ranking_block(r: ActionRanking) -> str:
         if item.reason:
             lines.append(f"   - {item.reason}")
     return "\n\n" + "\n".join(lines)
-
-

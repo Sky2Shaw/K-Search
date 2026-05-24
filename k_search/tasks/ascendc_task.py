@@ -348,13 +348,19 @@ Generate the corrected and optimized implementation:"""
 
     def get_code_format_text(self, *, language: str, target_gpu: str) -> str:
         """Hook used by the world-model generator to embed a code-format reminder."""
-        # When the world-model generator builds prompts it always passes a
-        # `base_code` argument; the prompt builders use this format text purely
-        # as a reminder. Returning the patch format is safe because cold-start
-        # prompts (no base) will be parsed leniently in code_for_world_model_from_raw.
+        # The world-model generator asks get_baseline_code_for_codegen() for an
+        # explicit disk baseline when no parent solution exists, so patch mode has
+        # a concrete base even for root actions.
         return self._format_text_for_mode(
             self._resolve_codegen_mode(has_baseline=True)
         )
+
+    def get_baseline_code_for_codegen(self, language: str | None = None) -> str:
+        """Return the current on-disk project as the explicit base for patch prompts."""
+        files = self._load_baseline_files_from_disk()
+        if not files:
+            return ""
+        return format_ascendc_project_files(files)
 
     def get_per_task_requirement_text(self, *, language: str, target_gpu: str, phase: str) -> str:
         if phase == "optimize" and self.codegen_mode != "full":

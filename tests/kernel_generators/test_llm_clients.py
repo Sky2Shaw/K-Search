@@ -1,4 +1,5 @@
 import builtins
+import asyncio
 import sys
 from types import SimpleNamespace
 
@@ -219,6 +220,31 @@ def test_claude_agent_client_rejects_empty_text(monkeypatch):
         client.generate("prompt")
 
 
+def test_claude_agent_timeout_defaults_from_api_timeout_ms(monkeypatch):
+    monkeypatch.delenv("KSEARCH_LLM_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("CLAUDE_AGENT_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.setenv("API_TIMEOUT_MS", "123000")
+
+    client = ClaudeAgentLLMClient(model_name="claude-sonnet-4-6")
+
+    assert client.timeout_seconds == 123.0
+
+
+def test_claude_agent_timeout_reports_clear_error_when_sdk_child_is_cancelled(monkeypatch):
+    async def fake_query(prompt, options):
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            raise RuntimeError("Command failed with exit code 143") from None
+        yield SimpleNamespace(result="unreachable")
+
+    _install_fake_claude_sdk(monkeypatch, fake_query)
+    client = ClaudeAgentLLMClient(model_name="claude-sonnet-4-6", timeout_seconds=0.01)
+
+    with pytest.raises(TimeoutError, match="timed out after 0.01s"):
+        client.generate("prompt")
+
+
 def test_claude_agent_client_reports_missing_sdk(monkeypatch):
     real_import = builtins.__import__
 
@@ -313,3 +339,91 @@ def test_world_model_generator_routes_llm_calls_through_injected_client():
 
     assert generator._wm._llm_call("wm prompt") == "wm text"
     assert fake_client.prompts == ["wm prompt"]
+
+
+def test_world_model_ascendc_root_action_prompt_uses_task_baseline():
+    from k_search.kernel_generators.kernel_generator_world_model import (
+        WorldModelKernelGeneratorWithBaseline,
+    )
+
+    class StopAfterPrompt(Exception):
+        pass
+
+    class FakeTask:
+        name = "mqa"
+
+        def get_definition_text(self, language):
+            return "spec"
+
+        def get_baseline_targets_text(self):
+            return ""
+
+        def get_code_format_text(self, language, target_gpu):
+            return "<ascendc_patch>"
+
+        def get_baseline_code_for_codegen(self, language):
+            return "<ascendc_project>BASELINE_CODE</ascendc_project>"
+
+        def code_for_world_model_from_raw(self, raw, language):
+            return str(raw or "")
+
+    class FakeWorldModel:
+        def propose_action_nodes(self, **kwargs):
+            return None
+
+        def get_tree_path_text(self, definition_name):
+            return ""
+
+        def get(self, definition_name):
+            return ""
+
+        def choose_next_action_node_id(self, definition_name):
+            return "n1"
+
+        def set_active_leaf_id(self, definition_name, node_id):
+            return None
+
+        def get_node_obj(self, definition_name, node_id):
+            return {
+                "id": "n1",
+                "node_id": "n1",
+                "parent_id": "root",
+                "action": {
+                    "title": "optimize",
+                    "difficulty_1_to_5": 1,
+                    "expected_vs_baseline_factor": 1.1,
+                },
+            }
+
+    captured = {}
+
+    class FakeLLMClient:
+        def generate(self, prompt):
+            return ""
+
+    generator = WorldModelKernelGeneratorWithBaseline(
+        model_name="fake-model",
+        language="ascendc",
+        target_gpu="Ascend910B3",
+        api_key=None,
+        llm_client=FakeLLMClient(),
+    )
+    generator._wm = FakeWorldModel()
+    generator._solution_db = None
+
+    def capture_prompt(prompt, task):
+        captured["prompt"] = prompt
+        raise StopAfterPrompt
+
+    generator._generate_code_from_prompt = capture_prompt
+
+    with pytest.raises(StopAfterPrompt):
+        generator._generate_world_model_cycles_v2(
+            task=FakeTask(),
+            max_opt_rounds=1,
+            wm_stagnation_window=1,
+            max_dai=1,
+        )
+
+    assert "BASELINE_CODE" in captured["prompt"]
+    assert "(no base code; start from spec)" not in captured["prompt"]
