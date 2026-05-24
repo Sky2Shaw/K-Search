@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -373,6 +374,11 @@ Generate the corrected and optimized implementation:"""
             try:
                 base_files = self._resolve_patch_base_files()
                 files = parse_ascendc_project_patch(text, base_files=base_files)
+                # Cache the applied result so subsequent patches diff against the
+                # post-patch state, not the pre-patch baseline. We deliberately do
+                # not set _last_parsed_raw — that field is owned by
+                # _parse_codegen_response's preview/commit contract.
+                self._last_parsed_files = dict(files)
                 return format_ascendc_project_files(files)
             except ValueError:
                 # Bad patch; let the WM see the raw response (truncated upstream).
@@ -412,7 +418,7 @@ Generate the corrected and optimized implementation:"""
                 self._last_parsed_files = dict(files)
                 self._last_parsed_raw = text
                 return files
-            except ValueError as exc:
+            except ValueError:
                 self._patch_failure_streak += 1
                 if (
                     self.codegen_mode == "auto"
@@ -420,7 +426,8 @@ Generate the corrected and optimized implementation:"""
                 ):
                     print(
                         f"[WARN] ascendc patch parse failed {self._patch_failure_streak}"
-                        f" times in a row; falling back to full codegen mode."
+                        f" times in a row; falling back to full codegen mode.",
+                        file=sys.stderr,
                     )
                     self.codegen_mode = "full"
                 raise
