@@ -170,8 +170,8 @@ def test_llm_interaction_logger_writes_hierarchical_human_readable_logs(monkeypa
     assert len(json_logs) == 1
     assert len(markdown_logs) == 1
     rel_parts = json_logs[0].relative_to(tmp_path).parts
-    assert rel_parts[0] == "multi_query_attention"
-    assert re.fullmatch(r"\d{8}", rel_parts[1])
+    assert re.fullmatch(r"\d{8}", rel_parts[0])
+    assert rel_parts[1] == "multi_query_attention"
     assert rel_parts[2:5] == ("world_model", "round_0003", "debug_codegen")
 
     raw_json = json_logs[0].read_text(encoding="utf-8")
@@ -202,8 +202,8 @@ def test_llm_interaction_logger_uses_unknown_hierarchy_without_context(monkeypat
     json_logs = list(tmp_path.rglob("*.json"))
     assert len(json_logs) == 1
     rel_parts = json_logs[0].relative_to(tmp_path).parts
-    assert rel_parts[0] == "__unknown__"
-    assert re.fullmatch(r"\d{8}", rel_parts[1])
+    assert re.fullmatch(r"\d{8}", rel_parts[0])
+    assert rel_parts[1] == "__unknown__"
     assert rel_parts[2:5] == ("direct", "global", "llm_call")
 
 
@@ -245,7 +245,7 @@ def test_codegen_logging_context_keeps_outer_round_and_stage(monkeypatch, tmp_pa
     json_logs = list(tmp_path.rglob("*.json"))
     assert len(json_logs) == 1
     rel_parts = json_logs[0].relative_to(tmp_path).parts
-    assert rel_parts[0] == "vec_add"
+    assert rel_parts[1] == "vec_add"
     assert rel_parts[2:5] == ("world_model", "round_0007", "debug_codegen")
     payload = json.loads(json_logs[0].read_text(encoding="utf-8"))
     assert payload["log_context"]["attempt"] == 1

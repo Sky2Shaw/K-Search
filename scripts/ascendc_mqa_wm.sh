@@ -26,7 +26,7 @@ fi
 # --- Configurable ------------------------------------------------------------
 KSEARCH_ROOT="${KSEARCH_ROOT:-/mnt/workspace/K-Search}"
 TASK_DIR="${TASK_DIR:-/mnt/workspace/cv_agent/tile2asc/multi_query_attention}"
-MODEL_NAME="${MODEL_NAME:-claude-sonnet-4-6}"
+MODEL_NAME="${MODEL_NAME:-glm-5.1}"
 MAX_ROUNDS="${MAX_ROUNDS:-20}"
 TARGET_GPU="${TARGET_GPU:-Ascend910B3}"
 TIMEOUT_S="${TIMEOUT_S:-900}"
@@ -39,7 +39,10 @@ export CLAUDE_CODE_MAX_OUTPUT_TOKENS="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-64000}"
 
 cd "$KSEARCH_ROOT"
 
-python -u -m pdb generate_kernels_and_eval.py \
+# Record task start time so LLM log dirs include a unique run-level timestamp.
+export KSEARCH_RUN_START="${KSEARCH_RUN_START:-$(date -u +%Y%m%d_%H%M%S)}"
+
+python -u generate_kernels_and_eval.py \
     --task-source ascendc \
     --task-path "$TASK_DIR" \
     --definition "$(basename "$TASK_DIR")" \

@@ -120,10 +120,11 @@ def _log_context_path(log_root: Path, *, timestamp_utc: str, context: dict[str, 
             break
     flow = context.get("flow") or context.get("process") or "direct"
     stage = context.get("stage") or context.get("phase") or "llm_call"
+    run_start = os.getenv("KSEARCH_RUN_START") or str(timestamp_utc)[:8]
     return (
         log_root
+        / _safe_log_path_component(run_start, default=str(timestamp_utc)[:8])
         / _safe_log_path_component(operator, default="__unknown__")
-        / str(timestamp_utc)[:8]
         / _safe_log_path_component(flow, default="direct")
         / _round_path_component(context)
         / _safe_log_path_component(stage, default="llm_call")
