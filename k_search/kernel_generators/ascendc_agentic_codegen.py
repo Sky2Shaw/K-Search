@@ -38,7 +38,7 @@ class AscendCAgenticCodegenResult:
     prompt_chars: int
     changed_paths: list[str]
     diff_text: str
-    worktree_path: str
+    project_path: str
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -148,7 +148,7 @@ class AscendCAgenticCodegenRunner:
                 prompt_chars=len(prompt),
                 changed_paths=changed_paths,
                 diff_text=diff_text,
-                worktree_path=str(session.project_dir),
+                project_path=str(session.project_dir),
             )
         finally:
             session.cleanup()

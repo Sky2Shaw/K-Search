@@ -9,6 +9,7 @@ from k_search.kernel_generators.ascendc_agentic_codegen import (
 )
 from k_search.kernel_generators.claude_agent_project_editor import ClaudeProjectEditResult
 from k_search.tasks.ascendc_task import AscendCTask
+from k_search.tasks.task_base import BuildSpec, Solution, SourceFile, SupportedLanguages
 
 
 class EditingClient:
@@ -135,3 +136,61 @@ def test_runner_fails_when_agent_makes_no_file_changes(tmp_path):
             ),
             base_solution=None,
         )
+
+
+def test_runner_overlays_base_solution_before_editing(tmp_path):
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    (task_dir / "kernel").mkdir()
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x")
+
+    base_solution = Solution(
+        name="base",
+        definition="x",
+        author="test",
+        spec=BuildSpec(
+            language=SupportedLanguages.ASCENDC,
+            target_hardware=["ascend_910b"],
+            entry_point="kernel/foo.h::run",
+        ),
+        sources=[SourceFile(path="kernel/foo.h", content="overlaid_base\n")],
+    )
+
+    class OverlayCheckClient:
+        def __init__(self):
+            self.project_dirs = []
+
+        def edit_project(self, *, project_dir, prompt):
+            root = Path(project_dir)
+            self.project_dirs.append(root)
+            pre_overlay = (root / "kernel" / "foo.h").read_text(encoding="utf-8")
+            assert pre_overlay == "overlaid_base\n"
+            (root / "kernel" / "foo.h").write_text("overlaid_base\nBETA\n", encoding="utf-8")
+            return ClaudeProjectEditResult(
+                text="edited",
+                transcript="edited",
+                prompt=prompt,
+                prompt_chars=len(prompt),
+                prompt_lines=prompt.count("\n") + 1,
+            )
+
+    client = OverlayCheckClient()
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=client)
+
+    result = runner.run(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text="spec",
+            action_text="overlay then edit",
+            trace_logs="",
+            perf_summary="",
+            target_gpu="ascend_910b",
+            round_num=2,
+            attempt_idx=1,
+            mode="improve",
+        ),
+        base_solution=base_solution,
+    )
+
+    assert "BETA" in next(src.content for src in result.solution.sources if src.path == "kernel/foo.h")
