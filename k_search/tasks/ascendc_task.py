@@ -65,6 +65,23 @@ def _normalize_rel_path(path: str) -> str:
     return raw
 
 
+def _is_forbidden_agentic_changed_path(path: str) -> bool:
+    rel = str(path or "").strip().replace("\\", "/")
+    if not rel:
+        return True
+    parts = tuple(p for p in rel.split("/") if p)
+    forbidden_parts = {
+        ".git",
+        ".ksearch",
+        "__pycache__",
+        "build",
+        "cmake-build-debug",
+        "logs",
+        "llm_logs",
+    }
+    return any(part in forbidden_parts for part in parts)
+
+
 def parse_ascendc_project_files(raw: Any) -> dict[str, str]:
     """Parse K-Search's AscendC multi-file container into path -> content."""
     if isinstance(raw, dict):
@@ -480,6 +497,90 @@ Generate the corrected and optimized implementation:"""
             ),
             sources=sources,
             description=f"{model_name} optimized AscendC project for {self.name} (round {int(round_num)})",
+        )
+
+    def get_agentic_definition_text(self, *, language: str) -> str:
+        return self.get_definition_text(
+            language=str(language),
+            include_sources=False,
+            include_format=False,
+        )
+
+    def overlay_solution_sources(
+        self,
+        *,
+        project_dir: str | Path,
+        solution: Solution | None,
+    ) -> None:
+        if solution is None:
+            return
+        root = Path(project_dir).expanduser().resolve()
+        for src in solution.sources or []:
+            rel = _normalize_rel_path(src.path)
+            dest = root / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(str(src.content or ""), encoding="utf-8")
+
+    def _validate_agentic_changed_paths(self, changed_paths: list[str] | None) -> None:
+        for path in changed_paths or []:
+            rel = _normalize_rel_path(path)
+            if _is_forbidden_agentic_changed_path(rel):
+                raise ValueError(f"forbidden agentic changed path: {rel}")
+
+    def make_solution_from_project_dir(
+        self,
+        *,
+        project_dir: str | Path,
+        changed_paths: list[str] | None,
+        raw_agent_output: str,
+        round_num: int,
+        model_name: str,
+        target_gpu: str,
+        language: str,
+    ) -> Solution:
+        self._validate_agentic_changed_paths(changed_paths)
+        root = Path(project_dir).expanduser().resolve()
+        sources = _collect_project_sources(root)
+        if not sources:
+            raise ValueError(f"agentic project produced no source files: {root}")
+        return Solution(
+            name=f"{model_name}_{self.name}_ascendc_agentic_r{int(round_num)}",
+            definition=self.name,
+            author=str(model_name),
+            spec=BuildSpec(
+                language=SupportedLanguages.ASCENDC,
+                target_hardware=[str(target_gpu or "ascend")],
+                entry_point=_default_entry_point(sources),
+            ),
+            sources=sources,
+            description=(
+                f"{model_name} agentic AscendC project for {self.name} "
+                f"(round {int(round_num)}): {str(raw_agent_output or '').strip()[:500]}"
+            ),
+        )
+
+    def solution_from_raw_code_for_agentic(
+        self,
+        *,
+        raw_code: str,
+        round_num: int,
+        model_name: str,
+        target_gpu: str,
+        language: str,
+    ) -> Solution:
+        files = parse_ascendc_project_files(raw_code)
+        sources = [SourceFile(path=path, content=content) for path, content in sorted(files.items())]
+        return Solution(
+            name=f"{model_name}_{self.name}_ascendc_agentic_base_r{int(round_num)}",
+            definition=self.name,
+            author=str(model_name),
+            spec=BuildSpec(
+                language=SupportedLanguages.ASCENDC,
+                target_hardware=[str(target_gpu or "ascend")],
+                entry_point=_default_entry_point(sources),
+            ),
+            sources=sources,
+            description=f"{model_name} AscendC agentic base for {self.name} (round {int(round_num)})",
         )
 
     def preview_parse_generated_code(self, *, raw_code: str) -> None:

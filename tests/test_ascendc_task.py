@@ -506,3 +506,99 @@ def test_code_for_world_model_from_raw_returns_applied_code_after_preview_parse(
     assert "<ascendc_project>" in wm_excerpt
     assert "<ascendc_patch>" not in wm_excerpt
     assert "BETA" in wm_excerpt
+
+
+def test_ascendc_task_overlays_solution_sources_into_project_dir(tmp_path):
+    task = AscendCTask(task_path=tmp_path, definition_name="x")
+    solution = Solution(
+        name="candidate",
+        definition="x",
+        author="test",
+        spec=BuildSpec(
+            language=SupportedLanguages.ASCENDC,
+            target_hardware=["ascend_910b"],
+            entry_point="kernel/foo.h::run",
+        ),
+        sources=[
+            SourceFile(path="kernel/foo.h", content="overlaid\n"),
+            SourceFile(path="tiling.cpp", content="tiling\n"),
+        ],
+    )
+
+    task.overlay_solution_sources(project_dir=tmp_path, solution=solution)
+
+    assert (tmp_path / "kernel" / "foo.h").read_text(encoding="utf-8") == "overlaid\n"
+    assert (tmp_path / "tiling.cpp").read_text(encoding="utf-8") == "tiling\n"
+
+
+def test_make_solution_from_project_dir_scans_sources_and_ignores_build_dirs(tmp_path):
+    (tmp_path / "kernel").mkdir()
+    (tmp_path / "kernel" / "foo.h").write_text("int x = 1;\n", encoding="utf-8")
+    (tmp_path / "kernel.cpp").write_text("void run() {}\n", encoding="utf-8")
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "generated.cpp").write_text("ignored\n", encoding="utf-8")
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("ignored\n", encoding="utf-8")
+    task = AscendCTask(task_path=tmp_path, definition_name="x")
+
+    solution = task.make_solution_from_project_dir(
+        project_dir=tmp_path,
+        changed_paths=["kernel/foo.h", "kernel.cpp"],
+        raw_agent_output="changed kernel files",
+        round_num=4,
+        model_name="claude-sonnet-4-6",
+        target_gpu="ascend_910b",
+        language="ascendc",
+    )
+
+    assert solution.definition == "x"
+    assert solution.spec.language == SupportedLanguages.ASCENDC
+    assert solution.spec.target_hardware == ["ascend_910b"]
+    assert solution.get_entry_path() == "kernel.cpp"
+    assert {src.path for src in solution.sources} == {"kernel/foo.h", "kernel.cpp"}
+    assert "changed kernel files" in str(solution.description)
+
+
+def test_make_solution_from_project_dir_rejects_forbidden_changed_path(tmp_path):
+    (tmp_path / "kernel.cpp").write_text("void run() {}\n", encoding="utf-8")
+    task = AscendCTask(task_path=tmp_path, definition_name="x")
+
+    with pytest.raises(ValueError, match="forbidden agentic changed path"):
+        task.make_solution_from_project_dir(
+            project_dir=tmp_path,
+            changed_paths=["build/generated.cpp"],
+            raw_agent_output="changed build output",
+            round_num=1,
+            model_name="claude",
+            target_gpu="ascend_910b",
+            language="ascendc",
+        )
+
+
+def test_get_agentic_definition_text_omits_source_containers(tmp_path):
+    (tmp_path / "spec.md").write_text("Vector add spec.", encoding="utf-8")
+    (tmp_path / "kernel.cpp").write_text("int source_should_not_appear = 1;\n", encoding="utf-8")
+    task = AscendCTask(task_path=tmp_path, definition_name="x")
+
+    text = task.get_agentic_definition_text(language="ascendc")
+
+    assert "Vector add spec." in text
+    assert "Existing project source excerpts" not in text
+    assert "source_should_not_appear" not in text
+    assert "<ascendc_project>" not in text
+
+
+def test_solution_from_raw_code_for_agentic_parses_full_container_without_advancing_patch_state(tmp_path):
+    task = AscendCTask(task_path=tmp_path, definition_name="x")
+    raw = format_ascendc_project_files({"kernel.cpp": "void run() {}\n"})
+
+    solution = task.solution_from_raw_code_for_agentic(
+        raw_code=raw,
+        round_num=8,
+        model_name="claude",
+        target_gpu="ascend_910b",
+        language="ascendc",
+    )
+
+    assert solution.definition == "x"
+    assert {src.path for src in solution.sources} == {"kernel.cpp"}
