@@ -9,7 +9,13 @@ from .kernel_generator_prompts import (
     get_optimization_prompt_from_definition_text,
     get_prompt_from_definition_text,
 )
-from .llm_clients import LLMClient, build_llm_client, normalize_llm_provider
+from .llm_clients import (
+    LLMClient,
+    LLMProviderFatalError,
+    build_llm_client,
+    llm_log_context,
+    normalize_llm_provider,
+)
 from k_search.tasks.task_base import BuildSpec, Solution, SourceFile, SupportedLanguages
 from k_search.tasks.task_base import Task, code_from_solution
 
@@ -205,7 +211,15 @@ class KernelGenerator:
                     f"prompt_chars={prompt_chars} prompt_lines={prompt_lines}",
                     flush=True,
                 )
-                generated_code = str(self.llm_client.generate(effective_prompt) or "").strip()
+                with llm_log_context(
+                    operator=(getattr(task, "name", None) if task is not None else None),
+                    phase="codegen",
+                    language=str(lang or self.language),
+                    target_gpu=str(self.target_gpu),
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                ):
+                    generated_code = str(self.llm_client.generate(effective_prompt) or "").strip()
                 print(
                     f"[LLM] codegen response provider={self.llm_provider} model={self.model_name} "
                     f"language={lang or self.language} attempt={attempt}/{max_attempts} "
@@ -238,6 +252,14 @@ class KernelGenerator:
             except Exception as e:
                 last_err = e
                 err_type = type(e).__name__
+                if isinstance(e, LLMProviderFatalError):
+                    print(
+                        f"[ERROR] LLM provider fatal error language={lang or self.language} "
+                        f"attempt={attempt}/{max_attempts} prompt_chars={prompt_chars} "
+                        f"prompt_lines={prompt_lines} error_type={err_type}: {e}",
+                        flush=True,
+                    )
+                    raise
                 if isinstance(e, TimeoutError):
                     if should_retry and attempt < max_attempts:
                         retry_notes.append(
@@ -425,7 +447,16 @@ class KernelGenerator:
                 )
             prompt = _append_baseline_hint(prompt)
             print(prompt)
-            code_result = self._generate_code_from_prompt(prompt, task=task)
+            with llm_log_context(
+                operator=str(getattr(task, "name", "") or ""),
+                flow="baseline",
+                round_index=0,
+                stage="initial_codegen",
+                max_rounds=max_opt_rounds,
+                language=str(self.language),
+                target_gpu=str(self.target_gpu),
+            ):
+                code_result = self._generate_code_from_prompt(prompt, task=task)
             current_code = code_result["cleaned"]
             current_raw_code = code_result["raw"]
 
@@ -648,7 +679,16 @@ class KernelGenerator:
                 opt_prompt = _append_baseline_hint(opt_prompt)
                 print(opt_prompt)
                 print(f"Generating optimized code for round {round_num + 1}...")
-                code_result = self._generate_code_from_prompt(opt_prompt, task=task)
+                with llm_log_context(
+                    operator=str(getattr(task, "name", "") or ""),
+                    flow="baseline",
+                    round_index=round_num + 1,
+                    stage="optimization_codegen",
+                    max_rounds=max_opt_rounds,
+                    language=str(self.language),
+                    target_gpu=str(self.target_gpu),
+                ):
+                    code_result = self._generate_code_from_prompt(opt_prompt, task=task)
                 current_code = code_result["cleaned"]
                 current_raw_code = code_result["raw"]
 

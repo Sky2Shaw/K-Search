@@ -12,6 +12,7 @@ from typing import Any, Optional
 from pathlib import Path
 
 from k_search.kernel_generators.kernel_generator import KernelGenerator
+from k_search.kernel_generators.llm_clients import LLMProviderFatalError, llm_log_context
 from k_search.tasks.task_base import code_from_solution
 from k_search.kernel_generators.kernel_generator_prompts import get_prompt_from_definition_text
 from k_search.kernel_generators.world_model_prompts import (
@@ -134,7 +135,8 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         self._artifacts_dir = artifacts_dir
 
         def _llm_call(prompt: str) -> str:
-            return self.llm_client.generate(prompt)
+            with llm_log_context(flow="world_model", phase="world_model_manager"):
+                return self.llm_client.generate(prompt)
 
         selection_policy = WorldModelSelectionPolicy()
         if wm_max_difficulty is not None:
@@ -284,24 +286,43 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         wm_code = _wm_guardrail(_code_for_wm_from_raw(current_raw_code))
                     except Exception:
                         wm_code = None
-                    self._wm.ensure_initialized(
-                        definition_name=task.name,
-                        definition_text=definition_text,
-                        current_code_excerpt=(str(wm_code) if isinstance(wm_code, str) and wm_code.strip() else None),
-                        eval_result=seed_eval,
-                        seed_root_solution_id=str(rec_seed.solution_id),
-                        seed_root_solution_name=str(rec_seed.solution_name),
-                        seed_root_round_index=0,
-                    )
+                    with llm_log_context(
+                        operator=str(getattr(task, "name", "") or ""),
+                        flow="world_model",
+                        round_index=0,
+                        stage="world_model_seed_init",
+                        language=str(self.language),
+                        target_gpu=str(self.target_gpu),
+                    ):
+                        self._wm.ensure_initialized(
+                            definition_name=task.name,
+                            definition_text=definition_text,
+                            current_code_excerpt=(str(wm_code) if isinstance(wm_code, str) and wm_code.strip() else None),
+                            eval_result=seed_eval,
+                            seed_root_solution_id=str(rec_seed.solution_id),
+                            seed_root_solution_name=str(rec_seed.solution_name),
+                            seed_root_round_index=0,
+                        )
                     _emit("[WM] Initialized+seeded root from continue_from_solution (code+eval).")
                     _emit(render_world_model_status(self._wm.get(task.name)))
                     self._persist_world_model_snapshot(task=task)
-            except Exception:
-                pass
+            except LLMProviderFatalError as exc:
+                _emit(f"[ERROR] world model seed init failed with fatal provider error: {exc}")
+                raise
+            except Exception as exc:
+                _emit(f"[WARN] world model seed init failed: {type(exc).__name__}: {exc}")
         else:
             _stage("initialize world model")
             t0 = time.perf_counter()
-            wm = self._wm.ensure_initialized(definition_name=task.name, definition_text=definition_text)
+            with llm_log_context(
+                operator=str(getattr(task, "name", "") or ""),
+                flow="world_model",
+                round_index=0,
+                stage="world_model_init",
+                language=str(self.language),
+                target_gpu=str(self.target_gpu),
+            ):
+                wm = self._wm.ensure_initialized(definition_name=task.name, definition_text=definition_text)
             dt = time.perf_counter() - t0
             _emit(render_world_model_status(wm))
             _emit(f"[STAGE] world model init latency: {dt:.2f}s")
@@ -454,16 +475,27 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             _stage(f"world model: select next action (cycle start @ round {cycle_start_round})")
             try:
                 wm_code = _wm_guardrail(_code_for_wm_from_raw(current_raw_code))
-                self._wm.propose_action_nodes(
-                    definition_name=task.name,
-                    definition_text=definition_text,
-                    current_code_excerpt=(str(wm_code) if str(wm_code).strip() else None),
-                    current_tree_path=self._wm.get_tree_path_text(definition_name=task.name),
-                    baseline_targets_text=baseline_targets_text,
+                with llm_log_context(
+                    operator=str(getattr(task, "name", "") or ""),
+                    flow="world_model",
                     round_index=cycle_start_round,
-                )
-            except Exception:
-                pass
+                    stage="world_model_propose_actions",
+                    language=str(self.language),
+                    target_gpu=str(self.target_gpu),
+                ):
+                    self._wm.propose_action_nodes(
+                        definition_name=task.name,
+                        definition_text=definition_text,
+                        current_code_excerpt=(str(wm_code) if str(wm_code).strip() else None),
+                        current_tree_path=self._wm.get_tree_path_text(definition_name=task.name),
+                        baseline_targets_text=baseline_targets_text,
+                        round_index=cycle_start_round,
+                    )
+            except LLMProviderFatalError as exc:
+                _emit(f"[ERROR] world model action proposal failed with fatal provider error: {exc}")
+                raise
+            except Exception as exc:
+                _emit(f"[WARN] world model action proposal failed: {type(exc).__name__}: {exc}")
             wm_json = self._wm.get(task.name)
             _emit(render_world_model_status(wm_json))
             _emit(render_open_action_nodes_block(wm_json, max_items=8))
@@ -752,7 +784,22 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                 prompt = _append_baseline_hint(prompt)
 
                 try:
-                    code_result = self._generate_code_from_prompt(prompt, task=task)
+                    with llm_log_context(
+                        operator=str(getattr(task, "name", "") or ""),
+                        flow="world_model",
+                        round_index=round_num,
+                        stage=("action_codegen" if attempt_idx == 1 else "debug_codegen"),
+                        action_node_id=str(chosen_leaf or ""),
+                        debug_attempt=attempt_idx,
+                        max_debug_attempts=max_dai,
+                        max_rounds=max_opt_rounds,
+                        language=str(self.language),
+                        target_gpu=str(self.target_gpu),
+                    ):
+                        code_result = self._generate_code_from_prompt(prompt, task=task)
+                except LLMProviderFatalError as exc:
+                    _emit(f"[ERROR] fatal LLM provider error during codegen: {exc}")
+                    raise
                 except (TimeoutError, ValueError, RuntimeError) as exc:
                     msg = (
                         f"codegen failed after retries for action_node_id={chosen_leaf} "
@@ -949,16 +996,25 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                     _emit(render_world_model_status(self._wm.get(task.name)))
                     self._persist_world_model_snapshot(task=task)
 
-                self._wm.refine(
-                    definition_name=task.name,
-                    definition_text=definition_text,
-                    chosen_action_text=chosen_action_text,
-                    current_code_excerpt=_wm_guardrail(str(cycle_best_wm_code or "")),
-                    current_tree_path=self._wm.get_tree_path_text(definition_name=task.name),
-                    eval_result=cycle_best_eval,
-                    prediction=prediction,
+                with llm_log_context(
+                    operator=str(getattr(task, "name", "") or ""),
+                    flow="world_model",
                     round_index=cycle_best_round,
-                )
+                    stage="world_model_refine",
+                    action_node_id=str(chosen_leaf or ""),
+                    language=str(self.language),
+                    target_gpu=str(self.target_gpu),
+                ):
+                    self._wm.refine(
+                        definition_name=task.name,
+                        definition_text=definition_text,
+                        chosen_action_text=chosen_action_text,
+                        current_code_excerpt=_wm_guardrail(str(cycle_best_wm_code or "")),
+                        current_tree_path=self._wm.get_tree_path_text(definition_name=task.name),
+                        eval_result=cycle_best_eval,
+                        prediction=prediction,
+                        round_index=cycle_best_round,
+                    )
                 _emit(render_world_model_status(self._wm.get(task.name)))
                 self._persist_world_model_snapshot(task=task)
             else:
@@ -968,22 +1024,36 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                     if round_eval is not None:
                         # Task guarantees failed evals contain only failure status + logs (no partial perf fields).
                         er_fail = round_eval
-                    self._wm.note_action_too_hard(
-                        definition_name=task.name,
-                        definition_text=definition_text,
-                        chosen_action_text=chosen_action_text,
-                        current_code_excerpt=_wm_guardrail(str(_code_for_wm_from_raw(current_raw_code) or "")),
-                        current_tree_path=self._wm.get_tree_path_text(definition_name=task.name),
-                        eval_result=er_fail,
-                        debug_and_improve_round=min(rounds_consumed, max_dai),
-                        debug_and_improve_max_rounds=max_dai,
-                        baseline_targets_text=baseline_targets_text,
+                    with llm_log_context(
+                        operator=str(getattr(task, "name", "") or ""),
+                        flow="world_model",
                         round_index=cycle_start_round + max(0, rounds_consumed - 1),
-                    )
+                        stage="world_model_mark_too_hard",
+                        action_node_id=str(chosen_leaf or ""),
+                        debug_attempt=min(rounds_consumed, max_dai),
+                        max_debug_attempts=max_dai,
+                        language=str(self.language),
+                        target_gpu=str(self.target_gpu),
+                    ):
+                        self._wm.note_action_too_hard(
+                            definition_name=task.name,
+                            definition_text=definition_text,
+                            chosen_action_text=chosen_action_text,
+                            current_code_excerpt=_wm_guardrail(str(_code_for_wm_from_raw(current_raw_code) or "")),
+                            current_tree_path=self._wm.get_tree_path_text(definition_name=task.name),
+                            eval_result=er_fail,
+                            debug_and_improve_round=min(rounds_consumed, max_dai),
+                            debug_and_improve_max_rounds=max_dai,
+                            baseline_targets_text=baseline_targets_text,
+                            round_index=cycle_start_round + max(0, rounds_consumed - 1),
+                        )
                     _emit(render_world_model_status(self._wm.get(task.name)))
                     self._persist_world_model_snapshot(task=task)
-                except Exception:
-                    pass
+                except LLMProviderFatalError as exc:
+                    _emit(f"[ERROR] world model too-hard update failed with fatal provider error: {exc}")
+                    raise
+                except Exception as exc:
+                    _emit(f"[WARN] world model too-hard update failed: {type(exc).__name__}: {exc}")
 
             cycle_start_round += max(1, rounds_consumed)
 

@@ -1,10 +1,13 @@
 import json
 
+import pytest
+
 from k_search.kernel_generators.world_model import (
     load_world_model_obj,
     try_parse_decision_tree_edit_ops,
     try_parse_world_model_json,
 )
+from k_search.kernel_generators.llm_clients import LLMAuthenticationError
 from k_search.kernel_generators.world_model_manager import WorldModelManager
 from k_search.tasks.task_base import EvalResult
 
@@ -188,6 +191,23 @@ def test_world_model_manager_falls_back_when_init_llm_call_times_out():
     assert "LLM init failed" in root["notes"]
     assert "timed out" in root["notes"]
     assert manager.choose_next_action_node_id(definition_name="multi_query_attention") is not None
+
+
+def test_world_model_manager_propagates_authentication_error_during_init():
+    def auth_failed_llm_call(prompt):
+        raise LLMAuthenticationError("API Error: 403 Access terminated")
+
+    manager = WorldModelManager(
+        llm_call=auth_failed_llm_call,
+        target_gpu="Ascend910B3",
+        language="ascendc",
+    )
+
+    with pytest.raises(LLMAuthenticationError, match="403 Access terminated"):
+        manager.ensure_initialized(
+            definition_name="multi_query_attention",
+            definition_text="Task: multi_query_attention\nReference Implementation:\ncode",
+        )
 
 
 def test_note_action_too_hard_deterministically_closes_active_action_when_edits_fail():

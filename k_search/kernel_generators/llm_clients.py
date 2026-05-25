@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import os
 import time
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -13,10 +15,182 @@ from typing import Any, Literal, Optional, Protocol
 LLMProvider = Literal["openai", "claude-agent"]
 
 
+class LLMProviderError(RuntimeError):
+    """Base class for LLM provider failures raised by client adapters."""
+
+
+class LLMProviderFatalError(LLMProviderError):
+    """Non-retryable provider failure; callers should surface this immediately."""
+
+
+class LLMAuthenticationError(LLMProviderFatalError):
+    """Authentication or account-access failure from an LLM provider."""
+
+
+def _looks_like_authentication_error(exc_or_text: Any) -> bool:
+    text = str(exc_or_text or "").strip().lower()
+    if not text:
+        return False
+    status_code = getattr(exc_or_text, "status_code", None)
+    if status_code in {401, 403}:
+        return True
+    return any(
+        marker in text
+        for marker in (
+            "api error: 401",
+            "api error: 403",
+            "failed to authenticate",
+            "authentication failed",
+            "unauthorized",
+            "forbidden",
+            "access terminated",
+            "permission denied",
+        )
+    )
+
+
+def _as_provider_exception(*, provider: str, model_name: str, exc: Exception) -> Exception:
+    if isinstance(exc, LLMProviderFatalError):
+        return exc
+    if _looks_like_authentication_error(exc):
+        return LLMAuthenticationError(
+            f"{provider} provider authentication failed for model {model_name}: {exc}"
+        )
+    return exc
+
+
 # ---------------------------------------------------------------------------
 # LLM interaction logging (prompt + response)
 # ---------------------------------------------------------------------------
 _log_counter = 0
+_llm_log_context: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextVar(
+    "ksearch_llm_log_context",
+    default={},
+)
+
+
+@contextmanager
+def llm_log_context(**metadata: Any):
+    current = dict(_llm_log_context.get() or {})
+    for key, value in metadata.items():
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        current[str(key)] = value
+    token = _llm_log_context.set(current)
+    try:
+        yield
+    finally:
+        _llm_log_context.reset(token)
+
+
+def _safe_log_path_component(value: Any, *, default: str, max_len: int = 96) -> str:
+    text = str(value if value is not None else "").strip()
+    if not text:
+        text = default
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in text).strip(".")
+    if not safe:
+        safe = default
+    return safe[:max_len]
+
+
+def _round_path_component(context: dict[str, Any]) -> str:
+    value = None
+    for key in ("round_index", "round_num", "round"):
+        if key in context and context.get(key) is not None:
+            value = context.get(key)
+            break
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return "global"
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return _safe_log_path_component(value, default="round")
+    if n >= 0:
+        return f"round_{n:04d}"
+    return _safe_log_path_component(value, default="round")
+
+
+def _log_context_path(log_root: Path, *, timestamp_utc: str, context: dict[str, Any]) -> Path:
+    operator = None
+    for key in ("operator", "task_name", "definition_name", "definition", "op"):
+        if context.get(key) is not None and str(context.get(key)).strip():
+            operator = context.get(key)
+            break
+    flow = context.get("flow") or context.get("process") or "direct"
+    stage = context.get("stage") or context.get("phase") or "llm_call"
+    return (
+        log_root
+        / _safe_log_path_component(operator, default="__unknown__")
+        / str(timestamp_utc)[:8]
+        / _safe_log_path_component(flow, default="direct")
+        / _round_path_component(context)
+        / _safe_log_path_component(stage, default="llm_call")
+    )
+
+
+def _json_safe_log_context(context: dict[str, Any]) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    for key, value in context.items():
+        if value is None or isinstance(value, (str, int, float, bool)):
+            safe[str(key)] = value
+        else:
+            safe[str(key)] = str(value)
+    return safe
+
+
+def _markdown_text_block(text: str) -> str:
+    content = str(text or "")
+    longest_backtick_run = 0
+    current_run = 0
+    for ch in content:
+        if ch == "`":
+            current_run += 1
+            longest_backtick_run = max(longest_backtick_run, current_run)
+        else:
+            current_run = 0
+    fence = "`" * max(3, longest_backtick_run + 1)
+    return f"{fence}text\n{content}\n{fence}"
+
+
+def _metadata_value(value: Any) -> str:
+    return str(value if value is not None else "").replace("\n", "\\n")
+
+
+def _format_llm_interaction_markdown(payload: dict[str, Any]) -> str:
+    log_context = payload.get("log_context")
+    lines = [
+        "# LLM Interaction Log",
+        "",
+        "## Metadata",
+        "",
+        f"- timestamp_utc: {_metadata_value(payload.get('timestamp_utc'))}",
+        f"- provider: {_metadata_value(payload.get('provider'))}",
+        f"- model_name: {_metadata_value(payload.get('model_name'))}",
+    ]
+    if payload.get("error") is not None:
+        lines.append(f"- error: {_metadata_value(payload.get('error'))}")
+    if isinstance(log_context, dict) and log_context:
+        lines.append("")
+        lines.append("## Context")
+        lines.append("")
+        for key in sorted(log_context):
+            lines.append(f"- {key}: {_metadata_value(log_context.get(key))}")
+    lines.extend(
+        [
+            "",
+            "## Prompt",
+            "",
+            _markdown_text_block(str(payload.get("prompt") or "")),
+            "",
+            "## Response",
+            "",
+            _markdown_text_block(str(payload.get("response") or "")),
+            "",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _log_llm_interaction(*, provider: str, model_name: str, prompt: str, response: str, error: str | None = None) -> None:
@@ -30,15 +204,18 @@ def _log_llm_interaction(*, provider: str, model_name: str, prompt: str, respons
         or os.path.join(os.getcwd(), ".ksearch-output-mqa", "llm_logs")
     ).expanduser().resolve()
 
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    context = _json_safe_log_context(dict(_llm_log_context.get() or {}))
+    target_dir = _log_context_path(log_dir, timestamp_utc=ts, context=context)
+
     try:
-        log_dir.mkdir(parents=True, exist_ok=True)
+        target_dir.mkdir(parents=True, exist_ok=True)
     except Exception:
         return  # Silently skip if we can't create the directory.
 
-    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     safe_model = "".join(c if c.isalnum() or c in "-_" else "_" for c in model_name)[:48]
     filename = f"{ts}_{_log_counter:04d}_{provider}_{safe_model}.json"
-    path = log_dir / filename
+    path = target_dir / filename
 
     payload = {
         "timestamp_utc": ts,
@@ -47,12 +224,15 @@ def _log_llm_interaction(*, provider: str, model_name: str, prompt: str, respons
         "prompt": str(prompt or ""),
         "response": str(response or ""),
     }
+    if context:
+        payload["log_context"] = context
     if error is not None:
         payload["error"] = error
 
     try:
         import json
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        path.with_suffix(".md").write_text(_format_llm_interaction_markdown(payload), encoding="utf-8")
     except Exception:
         pass  # Logging must never break the caller.
 
@@ -124,10 +304,13 @@ class OpenAICompatibleLLMClient:
             _log_llm_interaction(provider="openai", model_name=self.model_name, prompt=prompt, response=result)
             return result
         except Exception as exc:
+            provider_exc = _as_provider_exception(provider="openai", model_name=self.model_name, exc=exc)
             _log_llm_interaction(
-                provider="openai", model_name=self.model_name, prompt=prompt, response="", error=str(exc)
+                provider="openai", model_name=self.model_name, prompt=prompt, response="", error=str(provider_exc)
             )
-            raise
+            if provider_exc is exc:
+                raise
+            raise provider_exc from exc
 
 
 def _default_claude_agent_max_turns() -> Optional[int]:
@@ -223,7 +406,16 @@ class ClaudeAgentLLMClient:
                         final_text = text
                     else:
                         assistant_chunks.append(text)
+            except LLMProviderFatalError:
+                raise
             except Exception as exc:
+                provider_exc = _as_provider_exception(
+                    provider="claude-agent",
+                    model_name=self.model_name,
+                    exc=exc,
+                )
+                if isinstance(provider_exc, LLMProviderFatalError):
+                    raise provider_exc from exc
                 raise RuntimeError(f"Claude Agent SDK provider failed: {exc}") from exc
 
             result = (final_text or "\n".join(assistant_chunks)).strip()
@@ -236,10 +428,13 @@ class ClaudeAgentLLMClient:
             _log_llm_interaction(provider="claude-agent", model_name=self.model_name, prompt=prompt, response=result)
             return result
         except Exception as exc:
+            provider_exc = _as_provider_exception(provider="claude-agent", model_name=self.model_name, exc=exc)
             _log_llm_interaction(
-                provider="claude-agent", model_name=self.model_name, prompt=prompt, response="", error=str(exc)
+                provider="claude-agent", model_name=self.model_name, prompt=prompt, response="", error=str(provider_exc)
             )
-            raise
+            if provider_exc is exc:
+                raise
+            raise provider_exc from exc
 
     def _run_async(self, coro_factory: Any) -> str:
         timeout = float(self.timeout_seconds or 0)
@@ -298,6 +493,8 @@ class ClaudeAgentLLMClient:
 
         result = getattr(message, "result", None)
         result_text = str(result).strip() if result is not None else ""
+        if _looks_like_authentication_error(result_text):
+            raise LLMAuthenticationError(result_text)
         details = []
         if subtype_text is not None:
             details.append(f"subtype={subtype_text}")

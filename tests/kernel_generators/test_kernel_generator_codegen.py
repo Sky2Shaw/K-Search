@@ -1,6 +1,7 @@
 import pytest
 
 from k_search.kernel_generators.kernel_generator import KernelGenerator
+from k_search.kernel_generators.llm_clients import LLMAuthenticationError
 
 
 class _FakeLLMClient:
@@ -61,6 +62,29 @@ def test_ascendc_codegen_retries_timeout_before_failing():
 
     assert result["raw"] == "good patch"
     assert len(llm.prompts) == 2
+
+
+def test_ascendc_codegen_does_not_retry_authentication_failure():
+    llm = _FakeLLMClient(
+        [
+            LLMAuthenticationError(
+                "Claude Agent SDK provider failed: API Error: 403 Access terminated"
+            ),
+            "good patch",
+        ]
+    )
+    task = _PreviewTask()
+    generator = KernelGenerator(
+        model_name="test-model",
+        language="ascendc",
+        llm_provider="openai",
+        llm_client=llm,
+    )
+
+    with pytest.raises(LLMAuthenticationError, match="403 Access terminated"):
+        generator._generate_code_from_prompt("base prompt", task=task)
+
+    assert len(llm.prompts) == 1
 
 
 def test_ascendc_codegen_retry_refreshes_task_code_format_feedback():

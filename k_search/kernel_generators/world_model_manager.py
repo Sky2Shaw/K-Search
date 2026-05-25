@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from k_search.tasks.task_base import EvalResult
+from .llm_clients import LLMProviderFatalError
 from .world_model import (
     ActionCandidate,
     ActionRanking,
@@ -187,6 +188,8 @@ class WorldModelManager:
         init_error: str | None = None
         try:
             raw = (self._llm_call(prompts.init_prompt) or "").strip()
+        except LLMProviderFatalError:
+            raise
         except Exception as exc:
             init_error = f"{type(exc).__name__}: {str(exc)}"
             raw = ""
@@ -1262,6 +1265,8 @@ class WorldModelManager:
         )
         try:
             raw = (self._llm_call(edit_prompt) or "").strip()
+        except LLMProviderFatalError:
+            raise
         except Exception:
             return fallback
         edits = try_parse_decision_tree_edit_ops(raw)
