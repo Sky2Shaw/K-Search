@@ -39,7 +39,7 @@ export CLAUDE_CODE_MAX_OUTPUT_TOKENS="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-64000}"
 
 cd "$KSEARCH_ROOT"
 
-python generate_kernels_and_eval.py \
+python -u -m pdb generate_kernels_and_eval.py \
     --task-source ascendc \
     --task-path "$TASK_DIR" \
     --definition "$(basename "$TASK_DIR")" \

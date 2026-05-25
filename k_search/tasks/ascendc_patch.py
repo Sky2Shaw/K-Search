@@ -12,6 +12,7 @@ messages the upstream retry logic relies on.
 from __future__ import annotations
 
 import re
+import warnings
 from typing import Dict, Iterable, List, Tuple
 
 
@@ -44,6 +45,10 @@ _PATCH_BLOCK_RE = re.compile(
     r'<patch\s+path="([^"]+)"\s*(?:op="([^"]+)"\s*)?>\s*(.*?)\s*</patch>',
     re.DOTALL,
 )
+_ASCENDC_PATCH_CONTAINER_RE = re.compile(
+    r"<ascendc_patch>\s*(.*?)\s*</ascendc_patch>",
+    re.DOTALL,
+)
 _HUNK_HEADER_RE = re.compile(r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@.*$")
 
 
@@ -54,6 +59,28 @@ def _normalize_newlines(text: str) -> str:
 
 def _join_lines(lines: Iterable[str]) -> str:
     return "\n".join(lines)
+
+
+def _extract_ascendc_patch_body(text: str) -> str:
+    matches = list(_ASCENDC_PATCH_CONTAINER_RE.finditer(text))
+    if not matches:
+        raise ValueError("response did not contain an <ascendc_patch> container")
+
+    first = matches[0]
+    is_strict = (
+        len(matches) == 1
+        and not text[: first.start()].strip()
+        and not text[first.end() :].strip()
+    )
+    if is_strict:
+        return first.group(1)
+
+    warnings.warn(
+        "non-strict ascendc patch output; parsed final <ascendc_patch> container only",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    return matches[-1].group(1)
 
 
 def _iter_hunks(diff_body: str) -> Iterable[Tuple[int, int, List[str]]]:
@@ -212,12 +239,11 @@ def parse_ascendc_project_patch(
     Default op (unified diff) applies hunks to the matching base file.
     """
     text = _normalize_newlines(str(raw or ""))
-    if "<ascendc_patch>" not in text and "<patch " not in text:
-        raise ValueError("response did not contain an <ascendc_patch> container")
+    patch_text = _extract_ascendc_patch_body(text)
 
     out: Dict[str, str] = {p: c for p, c in base_files.items()}
     matched = False
-    for match in _PATCH_BLOCK_RE.finditer(text):
+    for match in _PATCH_BLOCK_RE.finditer(patch_text):
         matched = True
         path = match.group(1).strip()
         op = (match.group(2) or "").strip().lower()

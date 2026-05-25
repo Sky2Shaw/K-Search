@@ -154,3 +154,63 @@ def test_parse_ascendc_project_patch_error_message_includes_file_path():
         parse_ascendc_project_patch(raw, base_files=base_files)
     assert "kernel/foo.h" in str(exc_info.value)
 
+
+def test_parse_ascendc_project_patch_ignores_draft_patches_outside_final_container():
+    base_files = {"kernel/foo.h": "alpha\nbeta\ngamma\n"}
+    raw = (
+        "The compile failure is clear. Here is a draft patch:\n"
+        "```patch\n"
+        '<patch path="kernel/foo.h">\n'
+        "@@ -1,3 +1,3 @@\n"
+        " alpha\n"
+        "-WRONG_DRAFT_CONTEXT\n"
+        "+draft\n"
+        " gamma\n"
+        "</patch>\n"
+        "```\n"
+        "Final patch:\n"
+        "<ascendc_patch>\n"
+        '<patch path="kernel/foo.h">\n'
+        "@@ -1,3 +1,3 @@\n"
+        " alpha\n"
+        "-beta\n"
+        "+BETA\n"
+        " gamma\n"
+        "</patch>\n"
+        "</ascendc_patch>\n"
+    )
+
+    with pytest.warns(RuntimeWarning, match="non-strict ascendc patch output"):
+        files = parse_ascendc_project_patch(raw, base_files=base_files)
+
+    assert files["kernel/foo.h"] == "alpha\nBETA\ngamma\n"
+
+
+def test_parse_ascendc_project_patch_uses_last_container_when_multiple_are_present():
+    base_files = {"kernel/foo.h": "alpha\nbeta\ngamma\n"}
+    raw = (
+        "<ascendc_patch>\n"
+        '<patch path="kernel/foo.h">\n'
+        "@@ -1,3 +1,3 @@\n"
+        " alpha\n"
+        "-WRONG_DRAFT_CONTEXT\n"
+        "+draft\n"
+        " gamma\n"
+        "</patch>\n"
+        "</ascendc_patch>\n"
+        "The final corrected patch is below.\n"
+        "<ascendc_patch>\n"
+        '<patch path="kernel/foo.h">\n'
+        "@@ -1,3 +1,3 @@\n"
+        " alpha\n"
+        "-beta\n"
+        "+BETA\n"
+        " gamma\n"
+        "</patch>\n"
+        "</ascendc_patch>\n"
+    )
+
+    with pytest.warns(RuntimeWarning, match="non-strict ascendc patch output"):
+        files = parse_ascendc_project_patch(raw, base_files=base_files)
+
+    assert files["kernel/foo.h"] == "alpha\nBETA\ngamma\n"
