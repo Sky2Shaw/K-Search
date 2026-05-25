@@ -270,7 +270,16 @@ python generate_kernels_and_eval.py \
   --max-opt-rounds 1
 ```
 
-The initial Claude backend is prompt-to-text only. K-Search still owns code parsing, benchmark execution, world-model updates, and artifact persistence.
+Claude+AscendC uses agentic worktree codegen by default. K-Search creates an isolated candidate git worktree, gives Claude a compact optimization request, and lets Claude use `Read`, `Grep`, `Glob`, `Edit`, and `Write` inside that worktree. Bash is disabled. K-Search then scans the edited project into a `Solution` and still owns benchmark execution, world-model updates, and artifact persistence.
+
+Useful environment variables:
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `KSEARCH_AGENTIC_PROMPT_MAX_CHARS` | Hard budget for compact agentic codegen prompts | `20000` |
+| `KSEARCH_KEEP_AGENTIC_WORKTREES` | Set to `1` to preserve temporary candidate worktrees for inspection | unset |
+| `KSEARCH_DISABLE_ASCENDC_AGENTIC_CODEGEN` | Set to `1` to force the legacy prompt-to-text AscendC path | unset |
+| `KSEARCH_ASCENDC_AGENTIC_FALLBACK` | Set to `legacy` to allow legacy fallback after an agentic codegen failure | unset |
 
 ## Baselines
 

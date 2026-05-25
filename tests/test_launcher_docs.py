@@ -52,3 +52,7 @@ def test_readme_documents_claude_agent_sdk_installation():
     claude_section = readme.split("### Claude Agent SDK Backend", 1)[1]
 
     assert "uv pip install claude-agent-sdk" in claude_section
+    assert "Claude+AscendC uses agentic worktree codegen by default" in claude_section
+    assert "KSEARCH_AGENTIC_PROMPT_MAX_CHARS" in claude_section
+    assert "KSEARCH_KEEP_AGENTIC_WORKTREES" in claude_section
+    assert "Bash is disabled" in claude_section
