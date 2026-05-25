@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 from pathlib import Path
 
+from k_search.kernel_generators.ascendc_agentic_codegen import AscendCAgenticCodegenRequest
 from k_search.kernel_generators.kernel_generator import KernelGenerator
 from k_search.kernel_generators.llm_clients import LLMProviderFatalError, llm_log_context
 from k_search.tasks.task_base import code_from_solution
@@ -627,6 +628,134 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         "World-model generator expected a chosen action, but chosen_action_text is empty. "
                         f"(round={round_num} attempt={attempt_idx})"
                     )
+                # --- Agentic AscendC codegen branch ---
+                if self._should_use_ascendc_agentic_codegen(task):
+                    trace_excerpt = str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or "")
+                    perf_lines: list[str] = []
+                    if last_eval is not None:
+                        perf_lines.extend(last_eval.perf_summary_lines(prefix="last_attempt"))
+                    if base_eval is not None:
+                        perf_lines.extend(base_eval.perf_summary_lines(prefix="base"))
+                    perf_summary = "\n".join(perf_lines).strip()
+                    if attempt_idx == 1:
+                        agentic_mode = "action"
+                        agentic_action = str(chosen_action_text or "")
+                        base_solution_for_agentic = None
+                        if isinstance(base_raw_code, str) and base_raw_code.strip():
+                            try:
+                                base_solution_for_agentic = task.solution_from_raw_code_for_agentic(
+                                    raw_code=base_raw_code,
+                                    round_num=round_num,
+                                    model_name=str(self.model_name),
+                                    target_gpu=str(self.target_gpu),
+                                    language=str(self.language),
+                                )
+                            except Exception:
+                                base_solution_for_agentic = None
+                    else:
+                        agentic_mode = "debug" if cycle_best_solution is None else "improve"
+                        agentic_action = (
+                            str(chosen_action_text or "")
+                            + "\n\nContinue the same action. If the previous attempt failed, fix it first. "
+                            "If it passed, improve latency without broadening scope."
+                        )
+                        base_solution_for_agentic = last_solution or cycle_best_solution
+
+                    definition_hook = getattr(task, "get_agentic_definition_text", None)
+                    if callable(definition_hook):
+                        agentic_definition = str(definition_hook(language=str(self.language)) or "")
+                    else:
+                        agentic_definition = _definition_text_for_codegen_prompt(
+                            task,
+                            language=str(self.language),
+                            has_explicit_base_code=False,
+                        )
+                    request = AscendCAgenticCodegenRequest(
+                        definition_text=agentic_definition,
+                        action_text=agentic_action,
+                        trace_logs=trace_excerpt,
+                        perf_summary=perf_summary,
+                        target_gpu=str(self.target_gpu),
+                        round_num=int(round_num),
+                        attempt_idx=int(attempt_idx),
+                        mode=agentic_mode,  # type: ignore[arg-type]
+                    )
+                    try:
+                        result = self._agentic_runner().run(
+                            task=task,
+                            request=request,
+                            base_solution=base_solution_for_agentic,
+                        )
+                    except LLMProviderFatalError as exc:
+                        _emit(f"[ERROR] fatal LLM provider error during agentic codegen: {exc}")
+                        raise
+                    except (TimeoutError, ValueError, RuntimeError) as exc:
+                        if self._allow_ascendc_agentic_legacy_fallback():
+                            _emit(
+                                f"[WARN] agentic codegen failed for action_node_id={chosen_leaf} "
+                                f"round={round_num}; falling back to legacy prompt path: "
+                                f"{type(exc).__name__}: {exc}"
+                            )
+                        else:
+                            msg = (
+                                f"agentic codegen failed for action_node_id={chosen_leaf} "
+                                f"round={round_num}: {type(exc).__name__}: {exc}"
+                            )
+                            _emit(f"[WARN] {msg}")
+                            round_eval = EvalResult(
+                                status="codegen_failed",
+                                log_excerpt=msg,
+                                metrics={"score_name": "codegen", "score": -1.0},
+                            )
+                            last_eval = round_eval
+                            rounds_consumed = max(rounds_consumed, attempt_idx)
+                            break
+                    else:
+                        solution = result.solution
+                        current_code, current_raw_code = code_from_solution(self.language, solution)
+                        last_solution = solution
+                        current_wm_code = _wm_guardrail(_code_for_wm_from_raw(current_raw_code))
+                        _emit(
+                            f"[LLM] agentic ascendc result round={round_num} "
+                            f"prompt_chars={result.prompt_chars} "
+                            f"changed_files={','.join(result.changed_paths)} "
+                            f"project_path={result.project_path}"
+                        )
+                        _stage(f"evaluate solution (round {round_num})")
+                        round_eval = task.run_benchmark(
+                            solution=solution,
+                            dump_traces=False,
+                            round_num=int(round_num),
+                        )
+                        all_passed = bool(getattr(round_eval, "is_passed", lambda: False)())
+                        round_score = float(getattr(round_eval, "score", lambda: -1.0)())
+                        last_eval = round_eval
+                        if all_passed and round_score > best_score:
+                            best_score = float(round_score)
+                            best_eval = round_eval
+                            best_solution = solution
+                        if all_passed:
+                            if round_score > cycle_best_score:
+                                cycle_best_score = float(round_score)
+                                cycle_best_eval = round_eval
+                                cycle_best_solution = solution
+                                cycle_best_raw = str(current_raw_code or "")
+                                cycle_best_wm_code = str(current_wm_code or "")
+                                cycle_best_round = int(round_num)
+                                no_improve_streak = 0
+                            else:
+                                no_improve_streak += 1
+                        else:
+                            no_improve_streak += 1
+                        if cycle_best_solution is not None and base_score > 0:
+                            if cycle_best_score > base_score:
+                                no_improve_over_base_streak = 0
+                            else:
+                                no_improve_over_base_streak += 1
+                        rounds_consumed += 1
+                        if no_improve_streak >= stagnation_window or no_improve_over_base_streak >= stagnation_window:
+                            break
+                        continue
                 elif attempt_idx == 1:
                     # If the action's parent has an attached solution (including root when continuing),
                     # start from that base_code; otherwise fall back to spec+action.

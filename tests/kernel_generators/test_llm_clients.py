@@ -913,3 +913,118 @@ def test_baseline_ascendc_agentic_failure_can_fallback_to_legacy(monkeypatch, tm
     assert {src.path for src in solution.sources} == {"kernel.cpp"}
     assert legacy_client.prompts
     assert "<ascendc_project>" in legacy_client.prompts[0]
+
+
+def test_world_model_ascendc_codegen_uses_agentic_runner_before_prompt_construction(tmp_path):
+    from types import SimpleNamespace
+    from k_search.kernel_generators.kernel_generator_world_model import (
+        WorldModelKernelGeneratorWithBaseline,
+    )
+    from k_search.kernel_generators.ascendc_agentic_codegen import AscendCAgenticCodegenResult
+    from k_search.tasks.ascendc_task import AscendCTask
+    from k_search.tasks.task_base import EvalResult
+
+    (tmp_path / "spec.md").write_text("Optimize tiny project.", encoding="utf-8")
+    (tmp_path / "kernel").mkdir()
+    (tmp_path / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+
+    class FakeAgenticRunner:
+        def __init__(self):
+            self.requests = []
+
+        def run(self, *, task, request, base_solution):
+            self.requests.append(request)
+            (tmp_path / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+            solution = task.make_solution_from_project_dir(
+                project_dir=tmp_path,
+                changed_paths=["kernel/foo.h"],
+                raw_agent_output="edited",
+                round_num=request.round_num,
+                model_name="fake",
+                target_gpu=request.target_gpu,
+                language="ascendc",
+            )
+            return AscendCAgenticCodegenResult(
+                solution=solution,
+                raw=task.code_for_world_model_from_raw(raw={src.path: src.content for src in solution.sources}, language="ascendc"),
+                cleaned={src.path: src.content for src in solution.sources},
+                transcript="edited",
+                prompt="compact prompt",
+                prompt_chars=14,
+                changed_paths=["kernel/foo.h"],
+                diff_text="diff",
+                project_path=str(tmp_path),
+            )
+
+    class FakeWorldModel:
+        def propose_action_nodes(self, **kwargs):
+            return None
+
+        def get_tree_path_text(self, definition_name):
+            return ""
+
+        def get(self, definition_name):
+            return ""
+
+        def choose_next_action_node_id(self, definition_name):
+            return "n1"
+
+        def set_active_leaf_id(self, definition_name, node_id):
+            return None
+
+        def get_node_obj(self, definition_name, node_id):
+            return {
+                "id": "n1",
+                "node_id": "n1",
+                "parent_id": "root",
+                "action": {
+                    "title": "capitalize beta",
+                    "description": "Change beta to BETA.",
+                    "difficulty_1_to_5": 1,
+                    "expected_vs_baseline_factor": 1.1,
+                },
+            }
+
+        def get_solution_ref_for_node(self, definition_name, node_id):
+            return None
+
+        def attach_solution_to_active_leaf(self, **kwargs):
+            return None
+
+        def refine(self, **kwargs):
+            return None
+
+        def note_action_too_hard(self, **kwargs):
+            return None
+
+    task = AscendCTask(
+        task_path=tmp_path,
+        definition_name="x",
+        build_cmd="",
+        test_cmd="",
+        bench_cmd="python -c \"print('latency_ms=1.0')\"",
+        timeout_seconds=30,
+    )
+    generator = WorldModelKernelGeneratorWithBaseline(
+        model_name="fake",
+        language="ascendc",
+        target_gpu="ascend_910b",
+        llm_provider="claude-agent",
+        llm_client=SimpleNamespace(generate=lambda prompt: "{}"),
+    )
+    fake_runner = FakeAgenticRunner()
+    generator._wm = FakeWorldModel()
+    generator._solution_db = None
+    generator._ascendc_agentic_runner = fake_runner
+
+    solution = generator._generate_world_model_cycles_v2(
+        task=task,
+        max_opt_rounds=1,
+        wm_stagnation_window=1,
+        max_dai=1,
+    )
+
+    assert "BETA" in next(src.content for src in solution.sources if src.path == "kernel/foo.h")
+    assert len(fake_runner.requests) == 1
+    assert fake_runner.requests[0].action_text
+    assert "<ascendc_project>" not in fake_runner.requests[0].action_text
