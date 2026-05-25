@@ -5,3 +5,4 @@ wandb/
 openevolve_output/
 *.log
 .DS_Store
+.worktrees/
