@@ -45,7 +45,7 @@ class ClaudeAgentProjectEditorClient:
     thinking_enabled: bool = field(default_factory=_default_claude_agent_thinking_enabled)
     timeout_seconds: float = field(default_factory=_default_claude_agent_timeout_seconds)
 
-    def edit_project(self, project_dir: Path, prompt: str) -> ClaudeProjectEditResult:
+    def edit_project(self, *, project_dir: str | Path, prompt: str) -> ClaudeProjectEditResult:
         try:
             import claude_agent_sdk  # type: ignore
         except ImportError as exc:
@@ -59,8 +59,10 @@ class ClaudeAgentProjectEditorClient:
             ) from exc
 
         async def _run_edit() -> ClaudeProjectEditResult:
+            project_root = Path(project_dir).expanduser().resolve()
+            prompt_text = str(prompt or "")
             options_kwargs: dict[str, Any] = {
-                "cwd": str(project_dir),
+                "cwd": str(project_root),
                 "allowed_tools": list(self.allowed_tools),
                 "disallowed_tools": list(self.disallowed_tools),
                 "permission_mode": "acceptEdits",
@@ -71,41 +73,48 @@ class ClaudeAgentProjectEditorClient:
             if not self.thinking_enabled:
                 options_kwargs["thinking"] = {"type": "disabled"}
             options = claude_agent_sdk.ClaudeAgentOptions(**options_kwargs)
-
-            assistant_chunks: list[str] = []
+            chunks: list[str] = []
             final_text = ""
+            try:
+                async with claude_agent_sdk.ClaudeSDKClient(options=options) as client:
+                    await client.query(prompt_text)
+                    async for message in client.receive_response():
+                        is_result_message = hasattr(message, "result")
+                        if is_result_message:
+                            ClaudeAgentLLMClient._ensure_successful_result_message(message)
+                        text = ClaudeAgentLLMClient._extract_message_text(message)
+                        if not text:
+                            continue
+                        chunks.append(text)
+                        if is_result_message:
+                            final_text = text
+            except LLMProviderFatalError:
+                raise
+            except Exception as exc:
+                provider_exc = _as_provider_exception(
+                    provider="claude-agent", model_name=self.model_name, exc=exc,
+                )
+                if isinstance(provider_exc, LLMProviderFatalError):
+                    raise provider_exc from exc
+                raise RuntimeError(f"Claude Agent SDK project editor failed: {exc}") from exc
 
-            async with claude_agent_sdk.ClaudeSDKClient(options=options) as client:
-                await client.query(prompt)
-                async for message in client.receive_response():
-                    is_result_message = hasattr(message, "result")
-                    if is_result_message:
-                        ClaudeAgentLLMClient._ensure_successful_result_message(message)
-                    text = ClaudeAgentLLMClient._extract_message_text(message)
-                    if not text:
-                        continue
-                    if is_result_message:
-                        final_text = text
-                    else:
-                        assistant_chunks.append(text)
-
-            result_text = (final_text or "\n".join(assistant_chunks)).strip()
+            transcript = "\n".join(chunks).strip()
+            result_text = (final_text or transcript).strip()
             if not result_text:
-                raise RuntimeError("Claude Agent SDK returned empty text for project edit")
-
+                raise RuntimeError("Claude Agent SDK project editor returned empty text")
             return ClaudeProjectEditResult(
                 text=result_text,
-                transcript="\n".join(assistant_chunks + ([final_text] if final_text else [])),
-                prompt=prompt,
-                prompt_chars=len(prompt),
-                prompt_lines=prompt.count("\n") + 1,
+                transcript=transcript,
+                prompt=prompt_text,
+                prompt_chars=len(prompt_text),
+                prompt_lines=(prompt_text.count("\n") + 1 if prompt_text else 0),
             )
 
         try:
             result = self._run_async(_run_edit)
             _log_llm_interaction(
                 provider="claude-agent", model_name=self.model_name,
-                prompt=prompt, response=result.text,
+                prompt=prompt, response=result.transcript,
             )
             return result
         except Exception as exc:
