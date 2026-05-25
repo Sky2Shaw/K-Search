@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import os
 import shutil
 import subprocess
@@ -36,11 +37,6 @@ def _git_stdout(cwd: Path, *args: str) -> str:
     return _git(cwd, *args).stdout.strip()
 
 
-def _git_config_identity(cwd: Path) -> None:
-    _git(cwd, "config", "user.email", "ksearch@example.invalid")
-    _git(cwd, "config", "user.name", "K Search Agentic Codegen")
-
-
 def _find_git_root(path: Path) -> Optional[Path]:
     proc = _git(path, "rev-parse", "--show-toplevel", check=False)
     if proc.returncode != 0:
@@ -54,6 +50,66 @@ def _copy_project(src: Path, dst: Path) -> None:
     shutil.copytree(src, dst, dirs_exist_ok=True, ignore=ignore)
 
 
+def _remove_path(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def _mirror_project_state(src: Path, dst: Path, *, worktree_root: Path) -> None:
+    """Make the candidate project match the current task directory on disk."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst == worktree_root:
+        dst.mkdir(parents=True, exist_ok=True)
+        for child in list(dst.iterdir()):
+            if child.name == ".git":
+                continue
+            _remove_path(child)
+    else:
+        if dst.exists() or dst.is_symlink():
+            _remove_path(dst)
+        dst.mkdir(parents=True, exist_ok=True)
+    _copy_project(src, dst)
+
+
+def _git_status_paths(root: Path) -> list[str]:
+    proc = _git(root, "status", "--porcelain=v1", "--untracked-files=all", "-z")
+    entries = [entry for entry in proc.stdout.split("\0") if entry]
+    paths: list[str] = []
+    i = 0
+    while i < len(entries):
+        entry = entries[i]
+        status = entry[:2]
+        path = entry[3:] if len(entry) > 3 else ""
+        if path:
+            paths.append(path)
+        # Rename/copy records carry an additional path entry in porcelain -z.
+        i += 2 if status[:1] in {"R", "C"} or status[1:2] in {"R", "C"} else 1
+    return sorted(dict.fromkeys(paths))
+
+
+def _is_tracked_path(root: Path, rel_path: str) -> bool:
+    proc = _git(root, "ls-files", "--error-unmatch", "--", rel_path, check=False)
+    return proc.returncode == 0
+
+
+def _untracked_file_diff(root: Path, rel_path: str) -> str:
+    path = root / rel_path
+    if not path.is_file():
+        return ""
+    content = path.read_text(encoding="utf-8", errors="replace")
+    return "\n".join(
+        difflib.unified_diff(
+            [],
+            content.splitlines(),
+            fromfile="/dev/null",
+            tofile=f"b/{rel_path}",
+            lineterm="",
+        )
+    )
+
+
 @dataclass
 class AgenticWorktreeSession:
     worktree_root: Path
@@ -64,15 +120,17 @@ class AgenticWorktreeSession:
     baseline_commit: str
 
     def changed_paths(self) -> list[str]:
-        proc = _git(self.worktree_root, "diff", "--name-only", "HEAD", "--", check=True)
-        return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+        return _git_status_paths(self.worktree_root)
 
     def has_changes(self) -> bool:
-        proc = _git(self.worktree_root, "diff", "--quiet", "HEAD", "--", check=False)
-        return proc.returncode == 1
+        return bool(self.changed_paths())
 
     def diff_text(self) -> str:
-        return _git_stdout(self.worktree_root, "diff", "HEAD", "--")
+        parts = [_git_stdout(self.worktree_root, "diff", "HEAD", "--")]
+        for rel_path in self.changed_paths():
+            if not _is_tracked_path(self.worktree_root, rel_path):
+                parts.append(_untracked_file_diff(self.worktree_root, rel_path))
+        return "\n".join(part for part in parts if part)
 
     def commit_all(self, message: str) -> str:
         self.baseline_commit = _commit_all(self.worktree_root, message)
@@ -91,7 +149,28 @@ def _commit_all(root: Path, message: str) -> str:
     _git(root, "add", "-A")
     proc = _git(root, "diff", "--cached", "--quiet", check=False)
     if proc.returncode == 1:
-        _git(root, "commit", "-m", message)
+        _git(
+            root,
+            "-c",
+            "user.email=ksearch@example.invalid",
+            "-c",
+            "user.name=K Search Agentic Codegen",
+            "commit",
+            "-m",
+            message,
+        )
+    elif _git(root, "rev-parse", "--verify", "HEAD", check=False).returncode != 0:
+        _git(
+            root,
+            "-c",
+            "user.email=ksearch@example.invalid",
+            "-c",
+            "user.name=K Search Agentic Codegen",
+            "commit",
+            "--allow-empty",
+            "-m",
+            message,
+        )
     return _git_stdout(root, "rev-parse", "HEAD")
 
 
@@ -111,14 +190,14 @@ def create_agentic_worktree(*, task_path: str | Path | None) -> AgenticWorktreeS
     }
 
     repo_root = _find_git_root(task_root)
-    temp_root = Path(tempfile.mkdtemp(prefix="ksearch_agentic_worktree_")).resolve()
 
     if repo_root is not None:
+        temp_root = Path(tempfile.mkdtemp(prefix="ksearch_agentic_worktree_")).resolve()
         try:
             _git(repo_root, "worktree", "add", "--detach", str(temp_root), "HEAD")
             rel_project = task_root.relative_to(repo_root)
             project_dir = temp_root / rel_project
-            _git_config_identity(temp_root)
+            _mirror_project_state(task_root, project_dir, worktree_root=temp_root)
             baseline_commit = _commit_all(temp_root, "ksearch agentic baseline")
             return AgenticWorktreeSession(
                 worktree_root=temp_root,
@@ -134,7 +213,6 @@ def create_agentic_worktree(*, task_path: str | Path | None) -> AgenticWorktreeS
     fallback_root = Path(tempfile.mkdtemp(prefix="ksearch_agentic_temp_repo_")).resolve()
     _copy_project(task_root, fallback_root)
     _git(fallback_root, "init")
-    _git_config_identity(fallback_root)
     baseline_commit = _commit_all(fallback_root, "ksearch agentic baseline")
     return AgenticWorktreeSession(
         worktree_root=fallback_root,

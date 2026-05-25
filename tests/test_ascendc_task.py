@@ -531,6 +531,30 @@ def test_ascendc_task_overlays_solution_sources_into_project_dir(tmp_path):
     assert (tmp_path / "tiling.cpp").read_text(encoding="utf-8") == "tiling\n"
 
 
+def test_ascendc_task_overlay_removes_stale_source_candidates(tmp_path):
+    (tmp_path / "kernel").mkdir()
+    (tmp_path / "kernel" / "stale.h").write_text("stale\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("keep docs\n", encoding="utf-8")
+    task = AscendCTask(task_path=tmp_path, definition_name="x")
+    solution = Solution(
+        name="candidate",
+        definition="x",
+        author="test",
+        spec=BuildSpec(
+            language=SupportedLanguages.ASCENDC,
+            target_hardware=["ascend_910b"],
+            entry_point="kernel/fresh.h::run",
+        ),
+        sources=[SourceFile(path="kernel/fresh.h", content="fresh\n")],
+    )
+
+    task.overlay_solution_sources(project_dir=tmp_path, solution=solution)
+
+    assert not (tmp_path / "kernel" / "stale.h").exists()
+    assert (tmp_path / "kernel" / "fresh.h").read_text(encoding="utf-8") == "fresh\n"
+    assert (tmp_path / "README.md").read_text(encoding="utf-8") == "keep docs\n"
+
+
 def test_make_solution_from_project_dir_scans_sources_and_ignores_build_dirs(tmp_path):
     (tmp_path / "kernel").mkdir()
     (tmp_path / "kernel" / "foo.h").write_text("int x = 1;\n", encoding="utf-8")

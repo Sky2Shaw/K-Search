@@ -159,6 +159,20 @@ def _collect_project_sources(root: Path, *, max_files: int = 80, max_bytes_per_f
     return out
 
 
+def _remove_project_source_candidates(root: Path) -> None:
+    if not root.exists() or not root.is_dir():
+        return
+    skip_dirs = {".git", ".ksearch", "build", "cmake-build-debug", "__pycache__", "logs", "llm_logs"}
+    for p in sorted(root.rglob("*"), reverse=True):
+        try:
+            if any(part in skip_dirs for part in p.relative_to(root).parts):
+                continue
+            if p.is_file() and _is_source_candidate(p):
+                p.unlink()
+        except Exception:
+            continue
+
+
 def _default_entry_point(sources: list[SourceFile]) -> str:
     preferred = ("kernel.cpp", "op_kernel.cpp", "main.cpp")
     paths = {s.path for s in sources}
@@ -515,6 +529,7 @@ Generate the corrected and optimized implementation:"""
         if solution is None:
             return
         root = Path(project_dir).expanduser().resolve()
+        _remove_project_source_candidates(root)
         for src in solution.sources or []:
             rel = _normalize_rel_path(src.path)
             dest = root / rel

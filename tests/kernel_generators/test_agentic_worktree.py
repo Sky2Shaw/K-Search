@@ -54,6 +54,46 @@ def test_create_agentic_worktree_from_git_repo_tracks_project_subdir(tmp_path):
     assert not path.exists()
 
 
+def test_real_worktree_mirrors_dirty_task_path_and_preserves_repo_git_config(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_repo(repo)
+    _git(repo, "config", "user.email", "real@example.test")
+    _git(repo, "config", "user.name", "Real User")
+    (repo / "kernel" / "foo.h").write_text("dirty\n", encoding="utf-8")
+
+    session = create_agentic_worktree(task_path=repo / "kernel")
+
+    try:
+        assert (session.project_dir / "foo.h").read_text(encoding="utf-8") == "dirty\n"
+        assert _git(repo, "config", "user.email") == "real@example.test"
+        assert _git(repo, "config", "user.name") == "Real User"
+    finally:
+        session.cleanup()
+
+
+def test_real_worktree_materializes_untracked_task_subdir(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "ksearch@example.invalid")
+    _git(repo, "config", "user.name", "K Search Tests")
+    (repo / "README.md").write_text("root\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "initial")
+    task_path = repo / "untracked_task"
+    task_path.mkdir()
+    (task_path / "kernel.cpp").write_text("void run() {}\n", encoding="utf-8")
+
+    session = create_agentic_worktree(task_path=task_path)
+
+    try:
+        assert session.project_dir.exists()
+        assert (session.project_dir / "kernel.cpp").read_text(encoding="utf-8") == "void run() {}\n"
+    finally:
+        session.cleanup()
+
+
 def test_create_agentic_worktree_falls_back_for_non_git_task_path(tmp_path):
     task_path = tmp_path / "plain_task"
     task_path.mkdir()
@@ -77,6 +117,48 @@ def test_create_agentic_worktree_falls_back_for_non_git_task_path(tmp_path):
         session.cleanup()
 
     assert not path.exists()
+
+
+def test_changed_paths_and_diff_include_new_untracked_files(tmp_path):
+    task_path = tmp_path / "plain_task"
+    task_path.mkdir()
+    (task_path / "kernel.cpp").write_text("void run() {}\n", encoding="utf-8")
+
+    session = create_agentic_worktree(task_path=task_path)
+
+    try:
+        (session.project_dir / "new_helper.h").write_text("int helper;\n", encoding="utf-8")
+        assert session.changed_paths() == ["new_helper.h"]
+        assert "new_helper.h" in session.diff_text()
+        assert "+int helper;" in session.diff_text()
+    finally:
+        path = session.worktree_root
+        session.cleanup()
+
+    assert not path.exists()
+
+
+def test_non_git_fallback_does_not_leave_unused_temp_root(tmp_path, monkeypatch):
+    import k_search.kernel_generators.agentic_worktree as agentic_worktree
+
+    task_path = tmp_path / "plain_task"
+    task_path.mkdir()
+    (task_path / "kernel.cpp").write_text("void run() {}\n", encoding="utf-8")
+    created: list[Path] = []
+
+    def fake_mkdtemp(prefix: str) -> str:
+        path = tmp_path / f"{prefix}{len(created)}"
+        path.mkdir()
+        created.append(path)
+        return str(path)
+
+    monkeypatch.setattr(agentic_worktree.tempfile, "mkdtemp", fake_mkdtemp)
+
+    session = create_agentic_worktree(task_path=task_path)
+    session.cleanup()
+
+    assert created
+    assert all(not path.exists() for path in created)
 
 
 def test_agentic_worktree_preserve_env_keeps_directory(tmp_path, monkeypatch):
