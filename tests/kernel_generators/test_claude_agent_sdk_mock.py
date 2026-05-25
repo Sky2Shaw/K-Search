@@ -38,6 +38,40 @@ def test_mock_claude_agent_sdk_records_options_and_streams_messages(monkeypatch)
     assert sdk.calls[0].options.kwargs["disallowed_tools"] == ["Bash"]
 
 
+def test_claude_project_editor_client_uses_sdk_client_with_cwd_and_file_tools(monkeypatch, tmp_path):
+    from pathlib import Path
+    from k_search.kernel_generators.claude_agent_project_editor import ClaudeAgentProjectEditorClient
+
+    (tmp_path / "kernel").mkdir()
+    (tmp_path / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+
+    def edit_project(prompt, options, call_index):
+        project_dir = Path(options.kwargs["cwd"])
+        target = project_dir / "kernel" / "foo.h"
+        target.write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+        return [
+            MockClaudeMessage(content=[{"type": "text", "text": "edited foo.h"}]),
+            MockClaudeMessage(result="final summary"),
+        ]
+
+    sdk = install_mock_claude_agent_sdk(monkeypatch, responses=[edit_project])
+    client = ClaudeAgentProjectEditorClient(model_name="claude-sonnet-4-6", timeout_seconds=30)
+
+    result = client.edit_project(project_dir=tmp_path, prompt="Please edit the project.")
+
+    assert result.text == "final summary"
+    assert result.transcript == "edited foo.h\nfinal summary"
+    assert (tmp_path / "kernel" / "foo.h").read_text(encoding="utf-8") == "alpha\nBETA\ngamma\n"
+    assert len(sdk.client_calls) == 1
+    call = sdk.client_calls[0]
+    assert call.prompt == "Please edit the project."
+    assert call.options.kwargs["cwd"] == str(tmp_path)
+    assert call.options.kwargs["allowed_tools"] == ["Read", "Grep", "Glob", "Edit", "Write"]
+    assert call.options.kwargs["disallowed_tools"] == ["Bash"]
+    assert call.options.kwargs["permission_mode"] == "acceptEdits"
+    assert call.options.kwargs["model"] == "claude-sonnet-4-6"
+
+
 def test_claude_agent_sdk_mock_drives_ascendc_two_round_optimization(
     monkeypatch, tmp_path
 ):

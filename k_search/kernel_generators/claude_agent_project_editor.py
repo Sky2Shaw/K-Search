@@ -1,0 +1,168 @@
+"""Claude Agent SDK project-editor client for agentic codegen.
+
+This client uses ClaudeSDKClient as an async context manager that can
+Read/Grep/Glob/Edit/Write files inside a worktree, in contrast to
+ClaudeAgentLLMClient which uses query() as a prompt-to-text backend.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Optional
+
+from k_search.kernel_generators.llm_clients import (
+    ClaudeAgentLLMClient,
+    LLMProviderFatalError,
+    _as_provider_exception,
+    _default_claude_agent_max_turns,
+    _default_claude_agent_thinking_enabled,
+    _default_claude_agent_timeout_seconds,
+    _log_llm_interaction,
+)
+
+DEFAULT_PROJECT_EDITOR_TOOLS = ["Read", "Grep", "Glob", "Edit", "Write"]
+
+
+@dataclass
+class ClaudeProjectEditResult:
+    text: str
+    transcript: str
+    prompt: str
+    prompt_chars: int
+    prompt_lines: int
+
+
+@dataclass
+class ClaudeAgentProjectEditorClient:
+    model_name: str
+    max_turns: Optional[int] = field(default_factory=_default_claude_agent_max_turns)
+    allowed_tools: list[str] = field(default_factory=lambda: list(DEFAULT_PROJECT_EDITOR_TOOLS))
+    disallowed_tools: list[str] = field(default_factory=lambda: ["Bash"])
+    thinking_enabled: bool = field(default_factory=_default_claude_agent_thinking_enabled)
+    timeout_seconds: float = field(default_factory=_default_claude_agent_timeout_seconds)
+
+    def edit_project(self, project_dir: Path, prompt: str) -> ClaudeProjectEditResult:
+        try:
+            import claude_agent_sdk  # type: ignore
+        except ImportError as exc:
+            _log_llm_interaction(
+                provider="claude-agent", model_name=self.model_name,
+                prompt=prompt, response="", error=str(exc),
+            )
+            raise RuntimeError(
+                "Claude Agent SDK provider requires the 'claude-agent-sdk' package. "
+                "Install it with: pip install claude-agent-sdk"
+            ) from exc
+
+        async def _run_edit() -> ClaudeProjectEditResult:
+            options_kwargs: dict[str, Any] = {
+                "cwd": str(project_dir),
+                "allowed_tools": list(self.allowed_tools),
+                "disallowed_tools": list(self.disallowed_tools),
+                "permission_mode": "acceptEdits",
+                "model": self.model_name,
+            }
+            if self.max_turns is not None:
+                options_kwargs["max_turns"] = self.max_turns
+            if not self.thinking_enabled:
+                options_kwargs["thinking"] = {"type": "disabled"}
+            options = claude_agent_sdk.ClaudeAgentOptions(**options_kwargs)
+
+            assistant_chunks: list[str] = []
+            final_text = ""
+
+            async with claude_agent_sdk.ClaudeSDKClient(options=options) as client:
+                await client.query(prompt)
+                async for message in client.receive_response():
+                    is_result_message = hasattr(message, "result")
+                    if is_result_message:
+                        ClaudeAgentLLMClient._ensure_successful_result_message(message)
+                    text = ClaudeAgentLLMClient._extract_message_text(message)
+                    if not text:
+                        continue
+                    if is_result_message:
+                        final_text = text
+                    else:
+                        assistant_chunks.append(text)
+
+            result_text = (final_text or "\n".join(assistant_chunks)).strip()
+            if not result_text:
+                raise RuntimeError("Claude Agent SDK returned empty text for project edit")
+
+            return ClaudeProjectEditResult(
+                text=result_text,
+                transcript="\n".join(assistant_chunks + ([final_text] if final_text else [])),
+                prompt=prompt,
+                prompt_chars=len(prompt),
+                prompt_lines=prompt.count("\n") + 1,
+            )
+
+        try:
+            result = self._run_async(_run_edit)
+            _log_llm_interaction(
+                provider="claude-agent", model_name=self.model_name,
+                prompt=prompt, response=result.text,
+            )
+            return result
+        except Exception as exc:
+            provider_exc = _as_provider_exception(
+                provider="claude-agent", model_name=self.model_name, exc=exc,
+            )
+            _log_llm_interaction(
+                provider="claude-agent", model_name=self.model_name,
+                prompt=prompt, response="", error=str(provider_exc),
+            )
+            if provider_exc is exc:
+                raise
+            raise provider_exc from exc
+
+    def _run_async(self, coro_factory: Any) -> ClaudeProjectEditResult:
+        timeout = float(self.timeout_seconds or 0)
+        started = time.monotonic()
+
+        async def _timed_run() -> ClaudeProjectEditResult:
+            if timeout <= 0:
+                return await coro_factory()
+            return await asyncio.wait_for(coro_factory(), timeout=timeout)
+
+        def _timeout_error(exc: BaseException) -> TimeoutError:
+            return TimeoutError(
+                f"Claude Agent SDK provider timed out after {timeout:g}s. "
+                "Set KSEARCH_LLM_TIMEOUT_SECONDS or API_TIMEOUT_MS to adjust this limit."
+            )
+
+        def _looks_like_timeout_cancel(exc: BaseException) -> bool:
+            if timeout <= 0:
+                return False
+            elapsed = time.monotonic() - started
+            text = str(exc)
+            return elapsed >= (timeout * 0.9) and "exit code 143" in text
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            try:
+                return asyncio.run(_timed_run())
+            except TimeoutError as exc:
+                raise _timeout_error(exc) from exc
+            except RuntimeError as exc:
+                if _looks_like_timeout_cancel(exc):
+                    raise _timeout_error(exc) from exc
+                raise
+
+        def _runner() -> ClaudeProjectEditResult:
+            return asyncio.run(_timed_run())
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            try:
+                return executor.submit(_runner).result()
+            except TimeoutError as exc:
+                raise _timeout_error(exc) from exc
+            except RuntimeError as exc:
+                if _looks_like_timeout_cancel(exc):
+                    raise _timeout_error(exc) from exc
+                raise

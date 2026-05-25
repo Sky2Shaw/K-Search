@@ -469,6 +469,30 @@ def test_world_model_generator_routes_llm_calls_through_injected_client():
     assert fake_client.prompts == ["wm prompt"]
 
 
+def test_claude_agent_llm_client_still_uses_query_not_sdk_client(monkeypatch):
+    seen = {"query": 0, "client": 0}
+
+    class FakeClient:
+        def __init__(self, options):
+            seen["client"] += 1
+
+    async def fake_query(prompt, options):
+        seen["query"] += 1
+        yield SimpleNamespace(result="query text")
+
+    fake_module = SimpleNamespace(
+        ClaudeAgentOptions=lambda **kwargs: SimpleNamespace(kwargs=kwargs),
+        ClaudeSDKClient=FakeClient,
+        query=fake_query,
+    )
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_module)
+
+    client = ClaudeAgentLLMClient(model_name="claude-sonnet-4-6")
+
+    assert client.generate("prompt") == "query text"
+    assert seen == {"query": 1, "client": 0}
+
+
 def test_world_model_ascendc_root_action_prompt_uses_task_baseline():
     from k_search.kernel_generators.kernel_generator_world_model import (
         WorldModelKernelGeneratorWithBaseline,

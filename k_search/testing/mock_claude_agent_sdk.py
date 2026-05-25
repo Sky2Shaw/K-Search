@@ -64,12 +64,13 @@ MockResponseFactory = Callable[..., MockResponse]
 
 
 class MockClaudeAgentSDK:
-    """Queue-backed fake module implementing ClaudeAgentOptions and query()."""
+    """Queue-backed fake module implementing ClaudeAgentOptions, query(), and ClaudeSDKClient."""
 
     def __init__(self, responses: Iterable[MockResponse | MockResponseFactory]):
         self.responses = list(responses)
         self.calls: list[MockClaudeCall] = []
         self.options: list[MockClaudeAgentOptions] = []
+        self.client_calls: list[MockClaudeCall] = []
         self._response_index = 0
 
     def as_module(self) -> Any:
@@ -93,7 +94,40 @@ class MockClaudeAgentSDK:
             for message in sdk._coerce_messages(response):
                 yield message
 
-        return SimpleNamespace(ClaudeAgentOptions=ClaudeAgentOptions, query=query)
+        class ClaudeSDKClient:
+            def __init__(self, options: MockClaudeAgentOptions) -> None:
+                self.options = options
+                self._prompt = ""
+                self._messages: list[MockClaudeMessage] = []
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def query(self, prompt: str) -> None:
+                call_index = len(sdk.client_calls)
+                self._prompt = str(prompt or "")
+                sdk.client_calls.append(MockClaudeCall(prompt=self._prompt, options=self.options))
+                response = sdk._next_response(
+                    prompt=self._prompt,
+                    options=self.options,
+                    call_index=call_index,
+                )
+                if isinstance(response, BaseException):
+                    raise response
+                self._messages = sdk._coerce_messages(response)
+
+            async def receive_response(self):
+                for message in self._messages:
+                    yield message
+
+        return SimpleNamespace(
+            ClaudeAgentOptions=ClaudeAgentOptions,
+            ClaudeSDKClient=ClaudeSDKClient,
+            query=query,
+        )
 
     def _next_response(
         self,
