@@ -427,3 +427,210 @@ def test_world_model_ascendc_root_action_prompt_uses_task_baseline():
 
     assert "BASELINE_CODE" in captured["prompt"]
     assert "(no base code; start from spec)" not in captured["prompt"]
+
+
+def test_world_model_codegen_failure_marks_action_too_hard_and_returns_last_solution():
+    from k_search.kernel_generators.kernel_generator_world_model import (
+        WorldModelKernelGeneratorWithBaseline,
+    )
+    from k_search.tasks.task_base import EvalResult
+
+    class FakeTask:
+        name = "mqa"
+
+        def get_definition_text(self, language):
+            return "spec"
+
+        def get_baseline_targets_text(self):
+            return ""
+
+        def get_code_format_text(self, language, target_gpu):
+            return "<ascendc_patch>"
+
+        def get_baseline_code_for_codegen(self, language):
+            return "<ascendc_project>BASELINE_CODE</ascendc_project>"
+
+        def code_for_world_model_from_raw(self, raw, language):
+            return str(raw or "")
+
+        def get_last_round_trace_logs_for_prompt(self):
+            return "build failed"
+
+        def run_benchmark(self, solution, dump_traces=False, round_num=0):
+            return EvalResult(status="failed", log_excerpt="build failed")
+
+    class FakeWorldModel:
+        def __init__(self):
+            self.too_hard_calls = []
+
+        def propose_action_nodes(self, **kwargs):
+            return None
+
+        def get_tree_path_text(self, definition_name):
+            return ""
+
+        def get(self, definition_name):
+            return ""
+
+        def choose_next_action_node_id(self, definition_name):
+            return "n1"
+
+        def set_active_leaf_id(self, definition_name, node_id):
+            return None
+
+        def get_node_obj(self, definition_name, node_id):
+            return {
+                "id": "n1",
+                "node_id": "n1",
+                "parent_id": "root",
+                "action": {
+                    "title": "optimize",
+                    "difficulty_1_to_5": 1,
+                    "expected_vs_baseline_factor": 1.1,
+                },
+            }
+
+        def get_solution_ref_for_node(self, definition_name, node_id):
+            return None
+
+        def note_action_too_hard(self, **kwargs):
+            self.too_hard_calls.append(kwargs)
+
+    class FakeLLMClient:
+        def generate(self, prompt):
+            return ""
+
+    generator = WorldModelKernelGeneratorWithBaseline(
+        model_name="fake-model",
+        language="ascendc",
+        target_gpu="Ascend910B3",
+        api_key=None,
+        llm_client=FakeLLMClient(),
+    )
+    fake_wm = FakeWorldModel()
+    generator._wm = fake_wm
+    generator._solution_db = None
+
+    calls = {"count": 0}
+
+    def generate_or_timeout(prompt, task):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return {"raw": "candidate code", "cleaned": "candidate code"}
+        raise TimeoutError("Claude Agent SDK provider timed out after 1200s")
+
+    generator._generate_code_from_prompt = generate_or_timeout
+
+    solution = generator._generate_world_model_cycles_v2(
+        task=FakeTask(),
+        max_opt_rounds=2,
+        wm_stagnation_window=5,
+        max_dai=5,
+    )
+
+    assert solution.name == "fake-model_mqa_ascendc_optimized_r1"
+    assert len(fake_wm.too_hard_calls) == 1
+    assert fake_wm.too_hard_calls[0]["eval_result"].status == "codegen_failed"
+
+
+def test_world_model_debug_prompt_uses_applied_code_after_patch_response():
+    from k_search.kernel_generators.kernel_generator_world_model import (
+        WorldModelKernelGeneratorWithBaseline,
+    )
+    from k_search.tasks.task_base import EvalResult
+
+    class StopAfterSecondPrompt(Exception):
+        pass
+
+    class FakeTask:
+        name = "mqa"
+
+        def get_definition_text(self, language, include_sources=True, include_format=True):
+            return "spec"
+
+        def get_baseline_targets_text(self):
+            return ""
+
+        def get_code_format_text(self, language, target_gpu):
+            return "<ascendc_patch>"
+
+        def get_baseline_code_for_codegen(self, language):
+            return "<ascendc_project>BASELINE_CODE</ascendc_project>"
+
+        def code_for_world_model_from_raw(self, raw, language):
+            if raw == "RAW_PATCH_ONLY":
+                return "<ascendc_project>APPLIED_FULL_CODE</ascendc_project>"
+            return str(raw or "")
+
+        def get_last_round_trace_logs_for_prompt(self):
+            return "build failed"
+
+        def run_benchmark(self, solution, dump_traces=False, round_num=0):
+            return EvalResult(status="failed", log_excerpt="build failed")
+
+    class FakeWorldModel:
+        def propose_action_nodes(self, **kwargs):
+            return None
+
+        def get_tree_path_text(self, definition_name):
+            return ""
+
+        def get(self, definition_name):
+            return ""
+
+        def choose_next_action_node_id(self, definition_name):
+            return "n1"
+
+        def set_active_leaf_id(self, definition_name, node_id):
+            return None
+
+        def get_node_obj(self, definition_name, node_id):
+            return {
+                "id": "n1",
+                "node_id": "n1",
+                "parent_id": "root",
+                "action": {
+                    "title": "optimize",
+                    "difficulty_1_to_5": 1,
+                    "expected_vs_baseline_factor": 1.1,
+                },
+            }
+
+        def get_solution_ref_for_node(self, definition_name, node_id):
+            return None
+
+    class FakeLLMClient:
+        def generate(self, prompt):
+            return ""
+
+    generator = WorldModelKernelGeneratorWithBaseline(
+        model_name="fake-model",
+        language="ascendc",
+        target_gpu="Ascend910B3",
+        api_key=None,
+        llm_client=FakeLLMClient(),
+    )
+    generator._wm = FakeWorldModel()
+    generator._solution_db = None
+
+    prompts = []
+
+    def capture_second_prompt(prompt, task):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            return {"raw": "RAW_PATCH_ONLY", "cleaned": "RAW_PATCH_ONLY"}
+        raise StopAfterSecondPrompt
+
+    generator._generate_code_from_prompt = capture_second_prompt
+
+    with pytest.raises(StopAfterSecondPrompt):
+        generator._generate_world_model_cycles_v2(
+            task=FakeTask(),
+            max_opt_rounds=2,
+            wm_stagnation_window=5,
+            max_dai=5,
+        )
+
+    assert len(prompts) == 2
+    assert "APPLIED_FULL_CODE" in prompts[1]
+    assert "RAW_PATCH_ONLY" not in prompts[1]

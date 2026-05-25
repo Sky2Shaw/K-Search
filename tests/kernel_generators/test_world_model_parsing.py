@@ -6,6 +6,7 @@ from k_search.kernel_generators.world_model import (
     try_parse_world_model_json,
 )
 from k_search.kernel_generators.world_model_manager import WorldModelManager
+from k_search.tasks.task_base import EvalResult
 
 
 def test_world_model_json_accepts_dict_style_nodes_with_id_fields():
@@ -187,3 +188,119 @@ def test_world_model_manager_falls_back_when_init_llm_call_times_out():
     assert "LLM init failed" in root["notes"]
     assert "timed out" in root["notes"]
     assert manager.choose_next_action_node_id(definition_name="multi_query_attention") is not None
+
+
+def test_note_action_too_hard_deterministically_closes_active_action_when_edits_fail():
+    manager = WorldModelManager(
+        llm_call=lambda prompt: "not valid edit ops",
+        target_gpu="Ascend910B3",
+        language="ascendc",
+    )
+    manager.set(
+        "multi_query_attention",
+        json.dumps(
+            {
+                "kernel_summary": "MQA",
+                "decision_tree": {
+                    "root_id": "root",
+                    "active_leaf_id": "root",
+                    "nodes": [
+                        {"node_id": "root", "parent_id": None, "solution_ref": {"solution_id": None}},
+                        {
+                            "node_id": "n1",
+                            "parent_id": "root",
+                            "overall_rating_0_to_10": 9,
+                            "action": {
+                                "title": "too hard action",
+                                "score_0_to_1": 0.9,
+                                "difficulty_1_to_5": 3,
+                            },
+                            "solution_ref": {"solution_id": None},
+                        },
+                        {
+                            "node_id": "n2",
+                            "parent_id": "root",
+                            "overall_rating_0_to_10": 8,
+                            "action": {
+                                "title": "next action",
+                                "score_0_to_1": 0.8,
+                                "difficulty_1_to_5": 3,
+                            },
+                            "solution_ref": {"solution_id": None},
+                        },
+                    ],
+                },
+            }
+        ),
+    )
+    manager.set_active_leaf_id(definition_name="multi_query_attention", node_id="n1")
+
+    assert manager.choose_next_action_node_id(definition_name="multi_query_attention") == "n1"
+
+    manager.note_action_too_hard(
+        definition_name="multi_query_attention",
+        definition_text="spec",
+        chosen_action_text="- node_id: n1\n- title: too hard action",
+        current_code_excerpt="code",
+        current_tree_path="root -> n1",
+        eval_result=EvalResult(status="codegen_failed", log_excerpt="timeout"),
+        debug_and_improve_round=5,
+        debug_and_improve_max_rounds=5,
+        round_index=3,
+    )
+
+    assert manager.choose_next_action_node_id(definition_name="multi_query_attention") == "n2"
+    obj = load_world_model_obj(manager.get("multi_query_attention") or "")
+    n1 = next(n for n in obj["decision_tree"]["nodes"] if n["node_id"] == "n1")
+    assert n1["action"]["status"] == "too_hard"
+
+
+def test_note_action_too_hard_keeps_fallback_when_llm_call_raises():
+    manager = WorldModelManager(
+        llm_call=lambda prompt: (_ for _ in ()).throw(TimeoutError("too-hard edit timed out")),
+        target_gpu="Ascend910B3",
+        language="ascendc",
+    )
+    manager.set(
+        "multi_query_attention",
+        json.dumps(
+            {
+                "kernel_summary": "MQA",
+                "decision_tree": {
+                    "root_id": "root",
+                    "active_leaf_id": "root",
+                    "nodes": [
+                        {"node_id": "root", "parent_id": None, "solution_ref": {"solution_id": None}},
+                        {
+                            "node_id": "n1",
+                            "parent_id": "root",
+                            "action": {"title": "too hard", "score_0_to_1": 0.9},
+                            "solution_ref": {"solution_id": None},
+                        },
+                        {
+                            "node_id": "n2",
+                            "parent_id": "root",
+                            "action": {"title": "next", "score_0_to_1": 0.8},
+                            "solution_ref": {"solution_id": None},
+                        },
+                    ],
+                },
+            }
+        ),
+    )
+    manager.set_active_leaf_id(definition_name="multi_query_attention", node_id="n1")
+
+    updated = manager.note_action_too_hard(
+        definition_name="multi_query_attention",
+        definition_text="spec",
+        chosen_action_text="- node_id: n1\n- title: too hard",
+        current_code_excerpt="code",
+        current_tree_path="root -> n1",
+        eval_result=EvalResult(status="codegen_failed", log_excerpt="timeout"),
+        debug_and_improve_round=5,
+        debug_and_improve_max_rounds=5,
+        round_index=3,
+    )
+
+    assert updated is not None
+    assert manager.choose_next_action_node_id(definition_name="multi_query_attention") == "n2"

@@ -757,6 +757,13 @@ def render_open_action_nodes_block(
             s01 = 1.0
         return s01
 
+    def _action_is_closed(n: dict) -> bool:
+        act = n.get("action") if isinstance(n.get("action"), dict) else {}
+        for status in (n.get("status"), act.get("status"), act.get("state")):
+            if str(status or "").strip().lower() in {"too_hard", "blocked", "closed", "deferred", "skipped"}:
+                return True
+        return bool(n.get("too_hard") is True or act.get("too_hard") is True)
+
     cands: list[dict] = []
     open_total = 0
     for n in nodes:
@@ -766,6 +773,8 @@ def render_open_action_nodes_block(
             continue
         act = n.get("action")
         if not (isinstance(act, dict) and str(act.get("title") or "").strip()):
+            continue
+        if _action_is_closed(n):
             continue
         open_total += 1
         pid = n.get("parent_id")
@@ -1252,6 +1261,16 @@ def _normalize_world_model_obj(obj: dict[str, Any]) -> dict[str, Any]:
             except Exception:
                 act_norm["expected_vs_baseline_factor"] = None
             act_norm["rationale"] = str(act.get("rationale", "") or "").strip()
+            for key in (
+                "status",
+                "state",
+                "too_hard",
+                "too_hard_reason",
+                "too_hard_round",
+                "score_before_too_hard",
+            ):
+                if key in act:
+                    act_norm[key] = act.get(key)
 
         try:
             lur = int(n.get("last_updated_round", 0))

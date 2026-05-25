@@ -438,7 +438,7 @@ def test_kernel_generator_retries_ascendc_on_bad_patch_then_succeeds(tmp_path, m
     assert "BETA" in foo.content
 
 
-def test_kernel_generator_does_not_retry_ascendc_provider_timeout(tmp_path, capsys):
+def test_kernel_generator_retries_ascendc_provider_timeout_before_failing(tmp_path, capsys):
     from k_search.kernel_generators.kernel_generator import KernelGenerator
 
     task = AscendCTask(task_path=tmp_path, definition_name="x", codegen_mode="patch")
@@ -446,9 +446,11 @@ def test_kernel_generator_does_not_retry_ascendc_provider_timeout(tmp_path, caps
     class TimeoutClient:
         def __init__(self):
             self.calls = 0
+            self.prompts = []
 
         def generate(self, prompt):
             self.calls += 1
+            self.prompts.append(prompt)
             raise TimeoutError("Claude Agent SDK provider timed out after 1200s")
 
     client = TimeoutClient()
@@ -465,10 +467,13 @@ def test_kernel_generator_does_not_retry_ascendc_provider_timeout(tmp_path, caps
     assert "[LLM] codegen request" in output
     assert "language=ascendc" in output
     assert "attempt=1/5" in output
+    assert "attempt=5/5" in output
     assert "prompt_chars=14" in output
     assert "[ERROR] LLM codegen timeout" in output
     assert "error_type=TimeoutError" in output
-    assert client.calls == 1
+    assert client.calls == 5
+    assert "Previous code generation attempts failed before evaluation" in client.prompts[1]
+    assert "timed out after 1200s" in client.prompts[1]
 
 
 def test_code_for_world_model_from_raw_returns_applied_code_after_preview_parse(tmp_path):

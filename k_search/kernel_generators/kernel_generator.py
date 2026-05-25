@@ -156,13 +156,46 @@ class KernelGenerator:
         max_attempts = max_parse_retries if should_retry else 1
         prompt_chars = 0
         prompt_lines = 0
+        retry_notes: list[str] = []
 
         def _line_count(text: str) -> int:
             return (text.count("\n") + 1) if text else 0
 
+        def _short_error(e: Exception, limit: int = 1600) -> str:
+            text = str(e).strip()
+            if len(text) <= limit:
+                return text
+            return text[: limit - 3].rstrip() + "..."
+
+        def _with_retry_feedback(base_prompt: str) -> str:
+            if not retry_notes:
+                return base_prompt
+            feedback = "\n".join(f"- {note}" for note in retry_notes[-3:])
+            prompt_with_feedback = (
+                base_prompt
+                + "\n\nPrevious code generation attempts failed before evaluation. "
+                "Use this feedback to produce a fresh response that exactly matches the required format:\n"
+                + feedback
+            )
+            if task is not None:
+                fmt_hook = getattr(task, "get_code_format_text", None)
+                if callable(fmt_hook):
+                    try:
+                        current_format = str(
+                            fmt_hook(language=str(self.language), target_gpu=str(self.target_gpu)) or ""
+                        ).strip()
+                    except Exception:
+                        current_format = ""
+                    if current_format:
+                        prompt_with_feedback += (
+                            "\n\nCurrent required response format for this retry:\n"
+                            + current_format
+                        )
+            return prompt_with_feedback
+
         for attempt in range(1, max_attempts + 1):
             try:
-                effective_prompt = prompt
+                effective_prompt = _with_retry_feedback(prompt)
                 prompt_text = str(effective_prompt or "")
                 prompt_chars = len(prompt_text)
                 prompt_lines = _line_count(prompt_text)
@@ -206,18 +239,34 @@ class KernelGenerator:
                 last_err = e
                 err_type = type(e).__name__
                 if isinstance(e, TimeoutError):
-                    print(
-                        f"[ERROR] LLM codegen timeout language={lang or self.language} "
-                        f"attempt={attempt}/{max_attempts} prompt_chars={prompt_chars} "
-                        f"prompt_lines={prompt_lines} error_type={err_type}: {e}",
-                        flush=True,
+                    if should_retry and attempt < max_attempts:
+                        retry_notes.append(
+                            f"attempt {attempt} timed out: {_short_error(e)}"
+                        )
+                        print(
+                            f"[WARN] LLM codegen timeout language={lang or self.language} "
+                            f"attempt={attempt}/{max_attempts} prompt_chars={prompt_chars} "
+                            f"prompt_lines={prompt_lines} error_type={err_type}: {e}; "
+                            f"retrying generation ({attempt}/{max_attempts})...",
+                            flush=True,
+                        )
+                        continue
+                    else:
+                        print(
+                            f"[ERROR] LLM codegen timeout language={lang or self.language} "
+                            f"attempt={attempt}/{max_attempts} prompt_chars={prompt_chars} "
+                            f"prompt_lines={prompt_lines} error_type={err_type}: {e}",
+                            flush=True,
+                        )
+                        raise
+                if should_retry and attempt < max_attempts:
+                    retry_notes.append(
+                        f"attempt {attempt} failed with {err_type}: {_short_error(e)}"
                     )
-                    raise
-                if should_retry and attempt < max_parse_retries:
                     tag = "CUDA XML" if is_cuda else "AscendC"
                     print(
                         f"[WARN] {tag} parse failed error_type={err_type} "
-                        f"attempt={attempt}/{max_parse_retries} prompt_chars={prompt_chars} "
+                        f"attempt={attempt}/{max_attempts} prompt_chars={prompt_chars} "
                         f"prompt_lines={prompt_lines} ({e}); retrying generation ({attempt}/{max_parse_retries})...",
                         flush=True,
                     )

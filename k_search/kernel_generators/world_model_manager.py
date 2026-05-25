@@ -1235,9 +1235,16 @@ class WorldModelManager:
         prev = self.ensure_initialized(definition_name=name, definition_text=definition_text, reference_text=reference_text)
         if not prev:
             return prev
-        frontier_text = self._render_open_frontier_nodes_for_prompt(world_model_json=prev, max_items=10)
-        edit_prompt = build_decision_tree_edit_prompt(
+        fallback = self._mark_action_too_hard(
             world_model_json=prev,
+            chosen_action_text=chosen_action_text,
+            eval_result=eval_result,
+            round_index=round_index,
+        )
+        self.set(name, fallback)
+        frontier_text = self._render_open_frontier_nodes_for_prompt(world_model_json=fallback, max_items=10)
+        edit_prompt = build_decision_tree_edit_prompt(
+            world_model_json=fallback,
             definition_text=definition_text,
             baseline_targets_text=baseline_targets_text,
             debug_and_improve_round=debug_and_improve_round,
@@ -1253,19 +1260,98 @@ class WorldModelManager:
             eval_result=eval_result,
             max_chars=self._cfg.max_chars_per_block,
         )
-        raw = (self._llm_call(edit_prompt) or "").strip()
+        try:
+            raw = (self._llm_call(edit_prompt) or "").strip()
+        except Exception:
+            return fallback
         edits = try_parse_decision_tree_edit_ops(raw)
         if edits is None:
-            return prev
+            return fallback
         candidate = self._apply_decision_tree_ops(
             definition_name=name,
-            world_model_json=prev,
+            world_model_json=fallback,
             edits=edits,
+            round_index=round_index,
+        )
+        candidate = self._mark_action_too_hard(
+            world_model_json=candidate or fallback,
+            chosen_action_text=chosen_action_text,
+            eval_result=eval_result,
             round_index=round_index,
         )
         if candidate:
             self.set(name, candidate)
         return candidate
+
+    @staticmethod
+    def _action_is_closed(n: dict) -> bool:
+        act = n.get("action") if isinstance(n.get("action"), dict) else {}
+        statuses = [n.get("status"), act.get("status"), act.get("state")]
+        for status in statuses:
+            if str(status or "").strip().lower() in {"too_hard", "blocked", "closed", "deferred", "skipped"}:
+                return True
+        return bool(n.get("too_hard") is True or act.get("too_hard") is True)
+
+    def _mark_action_too_hard(
+        self,
+        *,
+        world_model_json: str,
+        chosen_action_text: str | None,
+        eval_result: EvalResult | None,
+        round_index: int | None,
+    ) -> str:
+        obj = load_world_model_obj(world_model_json or "")
+        if obj is None:
+            return world_model_json
+        dt = obj.get("decision_tree")
+        if not isinstance(dt, dict):
+            return world_model_json
+        nodes = dt.get("nodes")
+        if not isinstance(nodes, list):
+            return world_model_json
+
+        target_id = str(dt.get("active_leaf_id") or "").strip()
+        if not target_id and chosen_action_text:
+            m = re.search(r"\bnode_id\s*:\s*([A-Za-z0-9_.:-]+)", str(chosen_action_text))
+            if m:
+                target_id = m.group(1).strip()
+        if not target_id:
+            return world_model_json
+
+        reason = ""
+        if eval_result is not None:
+            reason = str(getattr(eval_result, "log_excerpt", "") or "").strip()
+            status = str(getattr(eval_result, "status", "") or "").strip()
+            if status:
+                reason = f"{status}: {reason}" if reason else status
+        if len(reason) > 500:
+            reason = reason[:500] + "...<truncated>..."
+
+        changed = False
+        for n in nodes:
+            if not isinstance(n, dict) or str(n.get("node_id") or "") != target_id:
+                continue
+            act = n.get("action")
+            if not isinstance(act, dict) or not str(act.get("title") or "").strip():
+                continue
+            sr = n.get("solution_ref")
+            if isinstance(sr, dict):
+                sid = sr.get("solution_id")
+                if isinstance(sid, str) and sid.strip():
+                    continue
+            act["status"] = "too_hard"
+            act["too_hard_round"] = round_index
+            if reason:
+                act["too_hard_reason"] = reason
+            if "score_before_too_hard" not in act:
+                act["score_before_too_hard"] = act.get("score_0_to_1")
+            act["score_0_to_1"] = 0.0
+            changed = True
+            break
+
+        if not changed:
+            return world_model_json
+        return dump_world_model_obj(obj) or world_model_json
 
     def choose_next_action_node_id(self, *, definition_name: str) -> Optional[str]:
         """
@@ -1372,6 +1458,8 @@ class WorldModelManager:
             has_action = bool(isinstance(act, dict) and str(act.get("title") or "").strip())
             if not has_action:
                 continue
+            if self._action_is_closed(n):
+                continue
             pid = n.get("parent_id")
             if pid is None:
                 continue
@@ -1476,6 +1564,8 @@ class WorldModelManager:
                 sid = str(v).strip() if isinstance(v, str) and v.strip() else None
             if sid is not None:
                 continue
+            if self._action_is_closed(n):
+                continue
             act = n.get("action")
             if isinstance(act, dict) and str(act.get("title") or "").strip():
                 count += 1
@@ -1514,6 +1604,8 @@ class WorldModelManager:
             if not isinstance(n, dict):
                 continue
             if _sid(n) is not None:
+                continue
+            if self._action_is_closed(n):
                 continue
             act = n.get("action")
             if not (isinstance(act, dict) and str(act.get("title") or "").strip()):
@@ -2287,6 +2379,8 @@ class WorldModelManager:
             if not isinstance(n, dict):
                 continue
             if _solution_id(n) is not None:
+                continue
+            if self._action_is_closed(n):
                 continue
             pid = n.get("parent_id")
             if pid is None:

@@ -423,6 +423,15 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             except Exception:
                 return str(s or "")
 
+        def _code_for_codegen_prompt_from_raw(raw: Any) -> str:
+            try:
+                code = _wm_guardrail(_code_for_wm_from_raw(raw))
+            except Exception:
+                code = ""
+            if str(code or "").strip():
+                return str(code)
+            return str(raw or "")
+
         best_solution: Optional[Any] = None
         best_eval: Optional[EvalResult] = None
         best_score: float = -1.0
@@ -562,6 +571,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
 
             # Last attempt summary (for next debug prompt)
             last_eval: Optional[EvalResult] = None
+            round_eval: Optional[EvalResult] = None
 
             while True:
                 if cycle_start_round + rounds_consumed > max_opt_rounds:
@@ -644,6 +654,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         if base_perf_eval is not None:
                             perf_summary_lines.extend(base_perf_eval.perf_summary_lines(prefix="base"))
                         perf_summary = "\n".join(perf_summary_lines).strip()
+                        current_code_for_prompt = _code_for_codegen_prompt_from_raw(current_raw_code)
                         codegen_definition_text = _definition_text_for_codegen_prompt(
                             task,
                             language=str(self.language),
@@ -657,7 +668,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 self.language,
                                 definition_text=codegen_definition_text,
                                 trace_logs=str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or ""),
-                                current_code=str(current_raw_code or ""),
+                                current_code=current_code_for_prompt,
                                 action_text=str(chosen_action_text or ""),
                                 code_format=_code_format_text(),
                                 debug_round=min(attempt_idx, max_dai),
@@ -671,7 +682,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 self.language,
                                 definition_text=codegen_definition_text,
                                 trace_logs=str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or ""),
-                                current_code=str(current_raw_code or ""),
+                                current_code=current_code_for_prompt,
                                 code_format=_code_format_text(),
                                 debug_round=min(attempt_idx, max_dai),
                                 max_rounds=max_dai,
@@ -703,6 +714,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         if base_perf_eval is not None:
                             perf_summary_lines.extend(base_perf_eval.perf_summary_lines(prefix="base"))
                         perf_summary = "\n".join(perf_summary_lines).strip()
+                        current_code_for_prompt = _code_for_codegen_prompt_from_raw(current_raw_code)
                         codegen_definition_text = _definition_text_for_codegen_prompt(
                             task,
                             language=str(self.language),
@@ -714,7 +726,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 definition_text=codegen_definition_text,
                                 trace_logs=str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or ""),
                                 base_code=base_for_debug,
-                                buggy_code=str(current_raw_code or ""),
+                                buggy_code=current_code_for_prompt,
                                 action_text=str(chosen_action_text or ""),
                                 code_format=_code_format_text(),
                                 debug_round=min(attempt_idx, max_dai),
@@ -728,7 +740,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 definition_text=codegen_definition_text,
                                 trace_logs=str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or ""),
                                 base_code=base_for_debug,
-                                current_code=str(current_raw_code or ""),
+                                current_code=current_code_for_prompt,
                                 code_format=_code_format_text(),
                                 debug_round=min(attempt_idx, max_dai),
                                 max_rounds=max_dai,
@@ -739,7 +751,22 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                 prompt = prompt + "\n\n" + render_world_model_section(self._wm.get(task.name), max_chars=self._world_model_max_chars)
                 prompt = _append_baseline_hint(prompt)
 
-                code_result = self._generate_code_from_prompt(prompt, task=task)
+                try:
+                    code_result = self._generate_code_from_prompt(prompt, task=task)
+                except (TimeoutError, ValueError, RuntimeError) as exc:
+                    msg = (
+                        f"codegen failed after retries for action_node_id={chosen_leaf} "
+                        f"round={round_num}: {type(exc).__name__}: {exc}"
+                    )
+                    _emit(f"[WARN] {msg}")
+                    round_eval = EvalResult(
+                        status="codegen_failed",
+                        log_excerpt=msg,
+                        metrics={"score_name": "codegen", "score": -1.0},
+                    )
+                    last_eval = round_eval
+                    rounds_consumed = max(rounds_consumed, attempt_idx)
+                    break
                 current_code = code_result["cleaned"]
                 current_raw_code = code_result["raw"]
                 _emit_kernel_cu(current_code)
