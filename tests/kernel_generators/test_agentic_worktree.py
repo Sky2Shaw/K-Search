@@ -68,7 +68,7 @@ def test_create_agentic_worktree_falls_back_for_non_git_task_path(tmp_path):
         assert session.repo_root is None
         assert session.project_dir == session.worktree_root
         assert (session.project_dir / "kernel.cpp").exists()
-        assert (session.project_dir / "build" / "artifact.o").exists()
+        assert not (session.project_dir / "build").exists()
         assert session.baseline_commit
         (session.project_dir / "kernel.cpp").write_text("int old_value = 2;\n", encoding="utf-8")
         assert session.changed_paths() == ["kernel.cpp"]

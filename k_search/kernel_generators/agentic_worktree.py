@@ -50,7 +50,7 @@ def _find_git_root(path: Path) -> Optional[Path]:
 
 
 def _copy_project(src: Path, dst: Path) -> None:
-    ignore = shutil.ignore_patterns(".git", ".ksearch", "__pycache__")
+    ignore = shutil.ignore_patterns(".git", ".ksearch", "__pycache__", "build", "cmake-build-debug", "logs")
     shutil.copytree(src, dst, dirs_exist_ok=True, ignore=ignore)
 
 
