@@ -602,3 +602,6 @@ def test_solution_from_raw_code_for_agentic_parses_full_container_without_advanc
 
     assert solution.definition == "x"
     assert {src.path for src in solution.sources} == {"kernel.cpp"}
+    assert task._last_parsed_files is None
+    assert task._last_parsed_raw is None
+    assert task._patch_failure_streak == 0

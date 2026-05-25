@@ -141,7 +141,7 @@ def _collect_project_sources(root: Path, *, max_files: int = 80, max_bytes_per_f
     if not root.exists() or not root.is_dir():
         return []
     out: list[SourceFile] = []
-    skip_dirs = {".git", ".ksearch", "build", "cmake-build-debug", "__pycache__"}
+    skip_dirs = {".git", ".ksearch", "build", "cmake-build-debug", "__pycache__", "logs", "llm_logs"}
     for p in sorted(root.rglob("*")):
         if any(part in skip_dirs for part in p.relative_to(root).parts):
             continue
