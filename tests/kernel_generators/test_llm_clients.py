@@ -877,3 +877,39 @@ def test_world_model_debug_prompt_uses_applied_code_after_patch_response():
     assert len(prompts) == 2
     assert "APPLIED_FULL_CODE" in prompts[1]
     assert "RAW_PATCH_ONLY" not in prompts[1]
+
+
+def test_baseline_ascendc_agentic_failure_can_fallback_to_legacy(monkeypatch, tmp_path):
+    from k_search.kernel_generators.kernel_generator import KernelGenerator
+    from k_search.tasks.ascendc_task import AscendCTask, format_ascendc_project_files
+
+    class FailingRunner:
+        def run(self, *, task, request, base_solution):
+            raise RuntimeError("agentic unavailable")
+
+    class LegacyClient:
+        def __init__(self):
+            self.prompts = []
+
+        def generate(self, prompt):
+            self.prompts.append(prompt)
+            return format_ascendc_project_files({"kernel.cpp": "void run() {}\n"})
+
+    (tmp_path / "spec.md").write_text("Optimize tiny project.", encoding="utf-8")
+    task = AscendCTask(task_path=tmp_path, definition_name="x")
+    legacy_client = LegacyClient()
+    generator = KernelGenerator(
+        model_name="fake",
+        language="ascendc",
+        target_gpu="ascend_910b",
+        llm_provider="claude-agent",
+        llm_client=legacy_client,
+    )
+    generator._ascendc_agentic_runner = FailingRunner()
+    monkeypatch.setenv("KSEARCH_ASCENDC_AGENTIC_FALLBACK", "legacy")
+
+    solution = generator.generate(task=task, max_opt_rounds=1)
+
+    assert {src.path for src in solution.sources} == {"kernel.cpp"}
+    assert legacy_client.prompts
+    assert "<ascendc_project>" in legacy_client.prompts[0]

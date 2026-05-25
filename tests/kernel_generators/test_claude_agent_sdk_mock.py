@@ -3,7 +3,7 @@ import sys
 
 from k_search.kernel_generators.kernel_generator import KernelGenerator
 from k_search.kernel_generators.llm_clients import ClaudeAgentLLMClient
-from k_search.tasks.ascendc_task import AscendCTask, format_ascendc_project_files
+from k_search.tasks.ascendc_task import AscendCTask
 from k_search.testing import (
     MockClaudeMessage,
     install_mock_claude_agent_sdk,
@@ -72,31 +72,29 @@ def test_claude_project_editor_client_uses_sdk_client_with_cwd_and_file_tools(mo
     assert call.options.kwargs["model"] == "claude-sonnet-4-6"
 
 
-def test_claude_agent_sdk_mock_drives_ascendc_two_round_optimization(
+def test_claude_agent_sdk_mock_drives_agentic_ascendc_two_round_optimization(
     monkeypatch, tmp_path
 ):
+    from pathlib import Path
+
     kernel_dir = tmp_path / "kernel"
     kernel_dir.mkdir()
     (tmp_path / "spec.md").write_text("Optimize a tiny AscendC project.", encoding="utf-8")
     (kernel_dir / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
 
-    initial_project = format_ascendc_project_files(
-        {"kernel/foo.h": "alpha\nbeta\ngamma\n"}
-    )
-    optimized_patch = (
-        "<ascendc_patch>\n"
-        '<patch path="kernel/foo.h">\n'
-        "@@ -1,3 +1,3 @@\n"
-        " alpha\n"
-        "-beta\n"
-        "+BETA\n"
-        " gamma\n"
-        "</patch>\n"
-        "</ascendc_patch>\n"
-    )
+    def first_edit(prompt, options, call_index):
+        project_dir = Path(options.kwargs["cwd"])
+        (project_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n// initial agent edit\n", encoding="utf-8")
+        return "kept initial project"
+
+    def second_edit(prompt, options, call_index):
+        project_dir = Path(options.kwargs["cwd"])
+        (project_dir / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+        return "edited kernel/foo.h"
+
     sdk = install_mock_claude_agent_sdk(
         monkeypatch,
-        responses=[initial_project, optimized_patch],
+        responses=[first_edit, second_edit],
     )
 
     task = AscendCTask(
@@ -128,6 +126,8 @@ def test_claude_agent_sdk_mock_drives_ascendc_two_round_optimization(
 
     foo = next(src for src in solution.sources if src.path == "kernel/foo.h")
     assert "BETA" in foo.content
-    assert len(sdk.calls) == 2
-    assert "<ascendc_project>" in sdk.calls[0].prompt
-    assert "<ascendc_patch>" in sdk.calls[1].prompt
+    assert len(sdk.client_calls) == 2
+    assert sdk.calls == []
+    assert "<ascendc_project>" not in sdk.client_calls[0].prompt
+    assert "<ascendc_project>" not in sdk.client_calls[1].prompt
+    assert sdk.client_calls[0].options.kwargs["cwd"]

@@ -16,6 +16,10 @@ from .llm_clients import (
     llm_log_context,
     normalize_llm_provider,
 )
+from .ascendc_agentic_codegen import (
+    AscendCAgenticCodegenRequest,
+    AscendCAgenticCodegenRunner,
+)
 from k_search.tasks.task_base import BuildSpec, Solution, SourceFile, SupportedLanguages
 from k_search.tasks.task_base import Task, code_from_solution
 
@@ -367,7 +371,71 @@ class KernelGenerator:
             description=solution_description,
         )
         return solution
-    
+
+    def _should_use_ascendc_agentic_codegen(self, task: Any) -> bool:
+        if self.llm_provider != "claude-agent":
+            return False
+        if str(self.language or "").strip().lower() != "ascendc":
+            return False
+        if os.getenv("KSEARCH_DISABLE_ASCENDC_AGENTIC_CODEGEN", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            return False
+        return hasattr(task, "make_solution_from_project_dir")
+
+    def _allow_ascendc_agentic_legacy_fallback(self) -> bool:
+        return os.getenv("KSEARCH_ASCENDC_AGENTIC_FALLBACK", "").strip().lower() == "legacy"
+
+    def _agentic_runner(self) -> AscendCAgenticCodegenRunner:
+        runner = getattr(self, "_ascendc_agentic_runner", None)
+        if runner is None:
+            runner = AscendCAgenticCodegenRunner(model_name=str(self.model_name))
+            self._ascendc_agentic_runner = runner
+        return runner
+
+    def _generate_ascendc_solution_agentically(
+        self,
+        *,
+        task: Any,
+        action_text: str,
+        trace_logs: str,
+        perf_summary: str,
+        round_num: int,
+        attempt_idx: int,
+        mode: str,
+        base_solution: Optional[Solution],
+    ) -> Solution:
+        definition_hook = getattr(task, "get_agentic_definition_text", None)
+        if callable(definition_hook):
+            definition_text = str(definition_hook(language=str(self.language)) or "").strip()
+        else:
+            definition_text = str(task.get_definition_text(language=str(self.language)) or "").strip()
+        request = AscendCAgenticCodegenRequest(
+            definition_text=definition_text,
+            action_text=str(action_text or "").strip(),
+            trace_logs=str(trace_logs or "").strip(),
+            perf_summary=str(perf_summary or "").strip(),
+            target_gpu=str(self.target_gpu),
+            round_num=int(round_num),
+            attempt_idx=int(attempt_idx),
+            mode=str(mode),  # type: ignore[arg-type]
+        )
+        result = self._agentic_runner().run(
+            task=task,
+            request=request,
+            base_solution=base_solution,
+        )
+        print(
+            f"[LLM] agentic ascendc result provider={self.llm_provider} model={self.model_name} "
+            f"round={round_num} prompt_chars={result.prompt_chars} "
+            f"changed_files={','.join(result.changed_paths)} project_path={result.project_path}",
+            flush=True,
+        )
+        return result.solution
+
     def generate(  # type: ignore[override]
         self,
         task: Task,
@@ -434,31 +502,57 @@ class KernelGenerator:
             seed_solution = base_sol
             current_code, current_raw_code = code_from_solution(self.language, base_sol)
         else:
-            gen_prompt_fn = getattr(task, "get_generation_prompt", None)
-            if callable(gen_prompt_fn):
-                prompt = str(gen_prompt_fn(language=str(self.language), target_gpu=str(self.target_gpu)) or "")
-            else:
-                per_req = _per_task_requirement_text(phase="generate")
-                prompt = get_prompt_from_definition_text(
-                    self.language,
-                    definition_text,
-                    self.target_gpu,
-                    per_task_requirement=per_req,
-                )
-            prompt = _append_baseline_hint(prompt)
-            print(prompt)
-            with llm_log_context(
-                operator=str(getattr(task, "name", "") or ""),
-                flow="baseline",
-                round_index=0,
-                stage="initial_codegen",
-                max_rounds=max_opt_rounds,
-                language=str(self.language),
-                target_gpu=str(self.target_gpu),
-            ):
-                code_result = self._generate_code_from_prompt(prompt, task=task)
-            current_code = code_result["cleaned"]
-            current_raw_code = code_result["raw"]
+            if self._should_use_ascendc_agentic_codegen(task):
+                try:
+                    solution = self._generate_ascendc_solution_agentically(
+                        task=task,
+                        action_text=(
+                            "Create an optimized AscendC candidate from the current project files. "
+                            "Keep public interfaces and harness behavior unchanged."
+                        ),
+                        trace_logs="",
+                        perf_summary="",
+                        round_num=0,
+                        attempt_idx=1,
+                        mode="generate",
+                        base_solution=None,
+                    )
+                    current_code, current_raw_code = code_from_solution(self.language, solution)
+                    seed_solution = solution
+                except Exception as exc:
+                    if not self._allow_ascendc_agentic_legacy_fallback():
+                        raise
+                    print(
+                        f"[WARN] agentic AscendC seed codegen failed; falling back to legacy prompt path: "
+                        f"{type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
+            if seed_solution is None and current_raw_code is None:
+                gen_prompt_fn = getattr(task, "get_generation_prompt", None)
+                if callable(gen_prompt_fn):
+                    prompt = str(gen_prompt_fn(language=str(self.language), target_gpu=str(self.target_gpu)) or "")
+                else:
+                    per_req = _per_task_requirement_text(phase="generate")
+                    prompt = get_prompt_from_definition_text(
+                        self.language,
+                        definition_text,
+                        self.target_gpu,
+                        per_task_requirement=per_req,
+                    )
+                prompt = _append_baseline_hint(prompt)
+                print(prompt)
+                with llm_log_context(
+                    operator=str(getattr(task, "name", "") or ""),
+                    flow="baseline",
+                    round_index=0,
+                    stage="initial_codegen",
+                    max_rounds=max_opt_rounds,
+                    language=str(self.language),
+                    target_gpu=str(self.target_gpu),
+                ):
+                    code_result = self._generate_code_from_prompt(prompt, task=task)
+                current_code = code_result["cleaned"]
+                current_raw_code = code_result["raw"]
 
         best_solution: Optional[Solution] = None
         best_eval = None
@@ -651,6 +745,34 @@ class KernelGenerator:
                 # Always use the optimization prompt template for the next round.
                 # Tasks may provide empty trace logs on PASS; we still want to carry forward
                 # previous round summary / best-so-far / current code context deterministically.
+                # --- Agentic AscendC optimization branch ---
+                if self._should_use_ascendc_agentic_codegen(task):
+                    base_for_agentic = solution
+                    action_text = (
+                        "Improve the current AscendC candidate. If the last attempt failed, fix compile, "
+                        "runtime, or correctness first. If it passed, reduce measured latency while preserving semantics."
+                    )
+                    try:
+                        solution = self._generate_ascendc_solution_agentically(
+                            task=task,
+                            action_text=action_text,
+                            trace_logs=str(trace_logs or ""),
+                            perf_summary=str(previous_round_summary_for_prompt or ""),
+                            round_num=round_num + 1,
+                            attempt_idx=1,
+                            mode="improve",
+                            base_solution=base_for_agentic,
+                        )
+                        current_code, current_raw_code = code_from_solution(self.language, solution)
+                        continue
+                    except Exception as exc:
+                        if not self._allow_ascendc_agentic_legacy_fallback():
+                            raise
+                        print(
+                            f"[WARN] agentic AscendC optimization codegen failed; "
+                            f"falling back to legacy prompt path: {type(exc).__name__}: {exc}",
+                            flush=True,
+                        )
                 opt_prompt_fn = getattr(task, "get_optimization_prompt", None)
                 if callable(opt_prompt_fn):
                     opt_prompt = str(
