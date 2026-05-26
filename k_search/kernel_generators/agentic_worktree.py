@@ -122,6 +122,27 @@ class AgenticWorktreeSession:
     def changed_paths(self) -> list[str]:
         return _git_status_paths(self.worktree_root)
 
+    def project_rel_path(self) -> str:
+        try:
+            rel = self.project_dir.resolve().relative_to(self.worktree_root.resolve())
+        except ValueError:
+            return "."
+        text = str(rel).replace("\\", "/")
+        return text if text else "."
+
+    def project_changed_paths(self) -> list[str]:
+        prefix = self.project_rel_path()
+        if prefix == ".":
+            return self.changed_paths()
+        project_prefix = prefix.rstrip("/") + "/"
+        out: list[str] = []
+        for path in self.changed_paths():
+            if path == prefix:
+                out.append(Path(path).name)
+            elif path.startswith(project_prefix):
+                out.append(path[len(project_prefix) :])
+        return sorted(dict.fromkeys(out))
+
     def has_changes(self) -> bool:
         return bool(self.changed_paths())
 
@@ -130,6 +151,20 @@ class AgenticWorktreeSession:
         for rel_path in self.changed_paths():
             if not _is_tracked_path(self.worktree_root, rel_path):
                 parts.append(_untracked_file_diff(self.worktree_root, rel_path))
+        return "\n".join(part for part in parts if part)
+
+    def project_diff_text(self) -> str:
+        prefix = self.project_rel_path()
+        if prefix == ".":
+            return self.diff_text()
+        parts = [_git_stdout(self.worktree_root, "diff", f"--relative={prefix}", "HEAD", "--", prefix)]
+        for rel_path in self.changed_paths():
+            project_prefix = prefix.rstrip("/") + "/"
+            if not rel_path.startswith(project_prefix):
+                continue
+            project_rel = rel_path[len(project_prefix) :]
+            if not _is_tracked_path(self.worktree_root, rel_path):
+                parts.append(_untracked_file_diff(self.project_dir, project_rel))
         return "\n".join(part for part in parts if part)
 
     def commit_all(self, message: str) -> str:

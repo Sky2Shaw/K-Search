@@ -596,6 +596,10 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             cycle_best_wm_code: str = ""
             cycle_best_score: float = -1.0
             cycle_best_round: int = 0
+            cycle_best_candidate_id: str | None = None
+            cycle_best_manifest_path: str | None = None
+            cycle_best_changed_paths: list[str] = []
+            cycle_best_diff_summary: str = ""
             # End the cycle only after this many consecutive non-improving rounds.
             no_improve_streak: int = 0
             # End the cycle if we keep failing to beat the parent/base score for too long (once we have any PASSED solution).
@@ -679,6 +683,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         round_num=int(round_num),
                         attempt_idx=int(attempt_idx),
                         mode=agentic_mode,  # type: ignore[arg-type]
+                        action_node_id=str(chosen_leaf) if chosen_leaf else None,
                     )
                     try:
                         result = self._agentic_runner().run(
@@ -721,12 +726,8 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                             f"changed_files={','.join(result.changed_paths)} "
                             f"project_path={result.project_path}"
                         )
-                        _stage(f"evaluate solution (round {round_num})")
-                        round_eval = task.run_benchmark(
-                            solution=solution,
-                            dump_traces=False,
-                            round_num=int(round_num),
-                        )
+                        _stage(f"use agentic worktree eval (round {round_num})")
+                        round_eval = result.eval_result
                         all_passed = bool(getattr(round_eval, "is_passed", lambda: False)())
                         round_score = float(getattr(round_eval, "score", lambda: -1.0)())
                         last_eval = round_eval
@@ -742,6 +743,18 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 cycle_best_raw = str(current_raw_code or "")
                                 cycle_best_wm_code = str(current_wm_code or "")
                                 cycle_best_round = int(round_num)
+                                cycle_best_candidate_id = (
+                                    result.candidate_patch.candidate_id
+                                    if result.candidate_patch is not None
+                                    else None
+                                )
+                                cycle_best_manifest_path = (
+                                    (result.artifact_paths or {}).get("manifest_path")
+                                    if isinstance(result.artifact_paths, dict)
+                                    else None
+                                )
+                                cycle_best_changed_paths = list(result.changed_paths or [])
+                                cycle_best_diff_summary = str(result.diff_text or "")[:4000]
                                 no_improve_streak = 0
                             else:
                                 no_improve_streak += 1
@@ -1121,6 +1134,10 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         solution_name=rec_best.solution_name,
                         eval_result=cycle_best_eval,
                         round_index=cycle_best_round,
+                        candidate_id=cycle_best_candidate_id,
+                        candidate_manifest_path=cycle_best_manifest_path,
+                        changed_paths=cycle_best_changed_paths,
+                        diff_summary=cycle_best_diff_summary,
                     )
                     _emit(render_world_model_status(self._wm.get(task.name)))
                     self._persist_world_model_snapshot(task=task)

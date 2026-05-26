@@ -131,6 +131,37 @@ def test_ascendc_task_run_benchmark_executes_build_test_bench_and_scores_latency
     assert "correctness passed" in result.log_excerpt
 
 
+def test_ascendc_task_run_benchmark_in_project_dir_uses_existing_project(tmp_path):
+    project = tmp_path / "candidate"
+    project.mkdir()
+    (project / "kernel.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
+    baseline = tmp_path / "baseline"
+    baseline.mkdir()
+    (baseline / "kernel.cpp").write_text("broken\n", encoding="utf-8")
+    task = AscendCTask(
+        task_path=baseline,
+        definition_name="vec_add",
+        build_cmd=_py_cmd(
+            "from pathlib import Path; "
+            "assert Path('kernel.cpp').read_text() == 'int main() { return 0; }\\n'; "
+            "print('build ok')"
+        ),
+        test_cmd=_py_cmd("print('correctness passed')"),
+        bench_cmd=_py_cmd("print('latency_ms=2.5')"),
+        reference_latency_ms=5.0,
+        timeout_seconds=30,
+    )
+
+    result = task.run_benchmark_in_project_dir(project_dir=project, round_num=7)
+
+    assert result.status == "passed"
+    assert result.latency_ms == 2.5
+    assert result.metrics["score"] == 2.0
+    assert result.metrics["workdir"] == str(project.resolve())
+    assert result.metrics["round"] == 7
+    assert "build ok" in result.log_excerpt
+
+
 def test_ascendc_task_run_benchmark_reports_compile_failure(tmp_path):
     solution = Solution(
         name="candidate",
@@ -531,9 +562,10 @@ def test_ascendc_task_overlays_solution_sources_into_project_dir(tmp_path):
     assert (tmp_path / "tiling.cpp").read_text(encoding="utf-8") == "tiling\n"
 
 
-def test_ascendc_task_overlay_removes_stale_source_candidates(tmp_path):
+def test_ascendc_task_overlay_preserves_unlisted_project_files(tmp_path):
     (tmp_path / "kernel").mkdir()
     (tmp_path / "kernel" / "stale.h").write_text("stale\n", encoding="utf-8")
+    (tmp_path / "kernel" / "large_header.hpp").write_text("x" * 210_000, encoding="utf-8")
     (tmp_path / "README.md").write_text("keep docs\n", encoding="utf-8")
     task = AscendCTask(task_path=tmp_path, definition_name="x")
     solution = Solution(
@@ -550,7 +582,8 @@ def test_ascendc_task_overlay_removes_stale_source_candidates(tmp_path):
 
     task.overlay_solution_sources(project_dir=tmp_path, solution=solution)
 
-    assert not (tmp_path / "kernel" / "stale.h").exists()
+    assert (tmp_path / "kernel" / "stale.h").read_text(encoding="utf-8") == "stale\n"
+    assert (tmp_path / "kernel" / "large_header.hpp").exists()
     assert (tmp_path / "kernel" / "fresh.h").read_text(encoding="utf-8") == "fresh\n"
     assert (tmp_path / "README.md").read_text(encoding="utf-8") == "keep docs\n"
 

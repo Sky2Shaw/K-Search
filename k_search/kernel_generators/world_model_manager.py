@@ -2061,6 +2061,10 @@ class WorldModelManager:
         solution_name: str,
         eval_result: EvalResult,
         round_index: Optional[int],
+        candidate_id: str | None = None,
+        candidate_manifest_path: str | None = None,
+        changed_paths: list[str] | None = None,
+        diff_summary: str | None = None,
     ) -> Optional[str]:
         """
         Attach a solution reference to the current active leaf node in the decision tree.
@@ -2098,6 +2102,10 @@ class WorldModelManager:
                     "parent_solution_id": existing_parent,
                     "eval": eval_result.to_dict(include_log_excerpt=False),
                     "round_index": round_index,
+                    "candidate_id": candidate_id,
+                    "candidate_manifest_path": candidate_manifest_path,
+                    "changed_paths": list(changed_paths or []),
+                    "diff_summary": str(diff_summary or ""),
                 }
             )
         updated = dump_world_model_obj(obj)

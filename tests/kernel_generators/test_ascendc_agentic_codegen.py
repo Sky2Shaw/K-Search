@@ -1,3 +1,6 @@
+import json
+import shlex
+import sys
 from pathlib import Path
 
 import pytest
@@ -10,6 +13,10 @@ from k_search.kernel_generators.ascendc_agentic_codegen import (
 from k_search.kernel_generators.claude_agent_project_editor import ClaudeProjectEditResult
 from k_search.tasks.ascendc_task import AscendCTask
 from k_search.tasks.task_base import BuildSpec, Solution, SourceFile, SupportedLanguages
+
+
+def _py_cmd(code: str) -> str:
+    return f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
 
 
 class EditingClient:
@@ -112,6 +119,63 @@ def test_runner_edits_worktree_and_returns_solution(tmp_path):
     assert "+BETA" in result.diff_text
     assert client.calls
     assert "<ascendc_project>" not in client.calls[0][1]
+
+
+def test_runner_evaluates_worktree_and_persists_project_snapshot_candidate(tmp_path):
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    (task_dir / "spec.md").write_text("Optimize tiny project.", encoding="utf-8")
+    (task_dir / "kernel").mkdir()
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    (task_dir / "kernel" / "large_header.hpp").write_text("x" * 210_000, encoding="utf-8")
+    task = AscendCTask(
+        task_path=task_dir,
+        definition_name="x",
+        artifacts_dir=str(tmp_path / "artifacts"),
+        build_cmd=_py_cmd(
+            "from pathlib import Path; "
+            "assert Path('kernel/foo.h').read_text() == 'alpha\\nBETA\\ngamma\\n'; "
+            "assert Path('kernel/large_header.hpp').exists(); "
+            "print('build saw edited complete worktree')"
+        ),
+        test_cmd=_py_cmd("print('correctness passed')"),
+        bench_cmd=_py_cmd("print('latency_ms=4.0')"),
+        reference_latency_ms=8.0,
+        timeout_seconds=30,
+    )
+    client = EditingClient("alpha\nBETA\ngamma\n")
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=client)
+
+    result = runner.run(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text=task.get_agentic_definition_text(language="ascendc"),
+            action_text="Change beta to BETA.",
+            trace_logs="",
+            perf_summary="",
+            target_gpu="ascend_910b",
+            round_num=3,
+            attempt_idx=1,
+            mode="action",
+            action_node_id="A-12",
+        ),
+        base_solution=None,
+    )
+
+    assert result.eval_result.status == "passed"
+    assert result.eval_result.metrics["score"] == 2.0
+    assert result.eval_result.metrics["workdir"] == result.project_path
+    assert "build saw edited complete worktree" in result.eval_result.log_excerpt
+    assert result.candidate_patch is not None
+    assert result.candidate_patch.action_node_id == "A-12"
+    assert result.project_snapshot is not None
+    assert "kernel/large_header.hpp" in result.project_snapshot.manifest
+    assert result.artifact_paths is not None
+    manifest = json.loads(Path(result.artifact_paths["manifest_path"]).read_text(encoding="utf-8"))
+    assert manifest["candidate_id"] == result.candidate_patch.candidate_id
+    assert manifest["snapshot_id"] == result.project_snapshot.snapshot_id
+    assert Path(result.artifact_paths["diff_path"]).read_text(encoding="utf-8") == result.diff_text
+    assert json.loads(Path(result.artifact_paths["eval_path"]).read_text(encoding="utf-8"))["status"] == "passed"
 
 
 def test_runner_fails_when_agent_makes_no_file_changes(tmp_path):

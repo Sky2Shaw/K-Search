@@ -529,7 +529,6 @@ Generate the corrected and optimized implementation:"""
         if solution is None:
             return
         root = Path(project_dir).expanduser().resolve()
-        _remove_project_source_candidates(root)
         for src in solution.sources or []:
             rel = _normalize_rel_path(src.path)
             dest = root / rel
@@ -679,16 +678,13 @@ Generate the corrected and optimized implementation:"""
         if err:
             logs.append(f"[{label} stderr]\n{err}")
 
-    def run_benchmark(
+    def _run_benchmark_in_workdir(
         self,
         *,
-        solution: Solution,
-        config: Any = None,
-        dump_traces: bool = False,
+        workdir: Path,
         round_num: int | None = None,
     ) -> EvalResult:
         logs: list[str] = []
-        workdir = self._prepare_workdir(solution)
         logs.append(f"[workdir] {workdir}")
 
         try:
@@ -781,6 +777,29 @@ Generate the corrected and optimized implementation:"""
                     metrics={"workdir": str(workdir), "round": round_num},
                 )
             )
+
+    def run_benchmark_in_project_dir(
+        self,
+        *,
+        project_dir: str | Path,
+        round_num: int | None = None,
+        dump_traces: bool = False,
+    ) -> EvalResult:
+        del dump_traces
+        workdir = Path(project_dir).expanduser().resolve()
+        return self._run_benchmark_in_workdir(workdir=workdir, round_num=round_num)
+
+    def run_benchmark(
+        self,
+        *,
+        solution: Solution,
+        config: Any = None,
+        dump_traces: bool = False,
+        round_num: int | None = None,
+    ) -> EvalResult:
+        del config, dump_traces
+        workdir = self._prepare_workdir(solution)
+        return self._run_benchmark_in_workdir(workdir=workdir, round_num=round_num)
 
     def _record_eval(self, result: EvalResult) -> EvalResult:
         self._last_eval = result

@@ -18,9 +18,10 @@ from .llm_clients import (
 )
 from .ascendc_agentic_codegen import (
     AscendCAgenticCodegenRequest,
+    AscendCAgenticCodegenResult,
     AscendCAgenticCodegenRunner,
 )
-from k_search.tasks.task_base import BuildSpec, Solution, SourceFile, SupportedLanguages
+from k_search.tasks.task_base import BuildSpec, EvalResult, Solution, SourceFile, SupportedLanguages
 from k_search.tasks.task_base import Task, code_from_solution
 
 # Optional Weights & Biases support
@@ -310,7 +311,7 @@ class KernelGenerator:
         raw_code: Any,
         task: Task,
         round_num: int,
-    ) -> Solution:
+    ) -> AscendCAgenticCodegenResult:
         """
         Create a k-search `Solution` from generated code.
 
@@ -434,7 +435,7 @@ class KernelGenerator:
             f"changed_files={','.join(result.changed_paths)} project_path={result.project_path}",
             flush=True,
         )
-        return result.solution
+        return result
 
     def generate(  # type: ignore[override]
         self,
@@ -488,6 +489,8 @@ class KernelGenerator:
 
         current_code = None
         current_raw_code = None
+        pending_agentic_eval: EvalResult | None = None
+        pending_agentic_solution: Solution | None = None
 
         # Seed initial code: continue from existing solution if provided; else generate fresh.
         seed_solution: Optional[Solution] = None
@@ -504,7 +507,7 @@ class KernelGenerator:
         else:
             if self._should_use_ascendc_agentic_codegen(task):
                 try:
-                    solution = self._generate_ascendc_solution_agentically(
+                    agentic_result = self._generate_ascendc_solution_agentically(
                         task=task,
                         action_text=(
                             "Create an optimized AscendC candidate from the current project files. "
@@ -517,6 +520,8 @@ class KernelGenerator:
                         mode="generate",
                         base_solution=None,
                     )
+                    solution = agentic_result.solution
+                    pending_agentic_eval = agentic_result.eval_result
                     current_code, current_raw_code = code_from_solution(self.language, solution)
                     seed_solution = solution
                 except Exception as exc:
@@ -563,7 +568,10 @@ class KernelGenerator:
             print(f"\n=== Optimization Round {round_num}/{max_opt_rounds} ===")
 
             # Use the provided seed solution on the first round if available
-            if round_num == 1 and seed_solution is not None:
+            if pending_agentic_solution is not None:
+                solution = pending_agentic_solution
+                pending_agentic_solution = None
+            elif round_num == 1 and seed_solution is not None:
                 solution = seed_solution
             else:
                 solution = self._create_solution_from_code(
@@ -574,7 +582,11 @@ class KernelGenerator:
                 )
 
             print("Evaluating solution...")
-            eval_result = task.run_benchmark(solution=solution, dump_traces=False, round_num=int(round_num))
+            if pending_agentic_eval is not None:
+                eval_result = pending_agentic_eval
+                pending_agentic_eval = None
+            else:
+                eval_result = task.run_benchmark(solution=solution, dump_traces=False, round_num=int(round_num))
             all_passed = bool(getattr(eval_result, "is_passed", lambda: False)())
             round_score = float(getattr(eval_result, "score", lambda: -1.0)())
 
@@ -753,7 +765,7 @@ class KernelGenerator:
                         "runtime, or correctness first. If it passed, reduce measured latency while preserving semantics."
                     )
                     try:
-                        solution = self._generate_ascendc_solution_agentically(
+                        agentic_result = self._generate_ascendc_solution_agentically(
                             task=task,
                             action_text=action_text,
                             trace_logs=str(trace_logs or ""),
@@ -763,6 +775,9 @@ class KernelGenerator:
                             mode="improve",
                             base_solution=base_for_agentic,
                         )
+                        solution = agentic_result.solution
+                        pending_agentic_eval = agentic_result.eval_result
+                        pending_agentic_solution = solution
                         current_code, current_raw_code = code_from_solution(self.language, solution)
                         continue
                     except Exception as exc:

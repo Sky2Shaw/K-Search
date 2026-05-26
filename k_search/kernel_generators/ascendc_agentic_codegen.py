@@ -5,14 +5,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from k_search.kernel_generators.agentic_candidate_artifacts import write_agentic_candidate_artifacts
 from k_search.kernel_generators.agentic_worktree import create_agentic_worktree
+from k_search.kernel_generators.candidate_patch import CandidatePatch
 from k_search.kernel_generators.claude_agent_project_editor import (
     ClaudeAgentProjectEditorClient,
     ClaudeProjectEditResult,
 )
-from k_search.tasks.task_base import Solution
+from k_search.kernel_generators.project_snapshot import ProjectSnapshot, create_project_snapshot
+from k_search.tasks.task_base import EvalResult, Solution
 from k_search.telemetry.context import TelemetryContext
 from k_search.telemetry.recorder import build_file_recorder
+from k_search.utils.paths import get_ksearch_artifacts_dir
 
 
 AgenticMode = Literal["generate", "action", "debug", "improve"]
@@ -28,11 +32,14 @@ class AscendCAgenticCodegenRequest:
     round_num: int
     attempt_idx: int
     mode: AgenticMode
+    parent_candidate_id: str | None = None
+    action_node_id: str | None = None
 
 
 @dataclass
 class AscendCAgenticCodegenResult:
     solution: Solution
+    eval_result: EvalResult
     raw: str
     cleaned: dict[str, str]
     transcript: str
@@ -41,6 +48,11 @@ class AscendCAgenticCodegenResult:
     changed_paths: list[str]
     diff_text: str
     project_path: str
+    diff_after_eval: str | None = None
+    evaluator_mutated_project: bool = False
+    candidate_patch: CandidatePatch | None = None
+    project_snapshot: ProjectSnapshot | None = None
+    artifact_paths: dict[str, str] | None = None
     trace_path: str | None = None
     timeline_path: str | None = None
     cost_path: str | None = None
@@ -170,13 +182,20 @@ class AscendCAgenticCodegenRunner:
                 )
             finally:
                 telemetry_recorder.close()
-            changed_paths = session.changed_paths()
+            project_changed_paths = session.project_changed_paths()
+            changed_paths = project_changed_paths or session.changed_paths()
             if not changed_paths:
                 raise RuntimeError(
                     "Claude agentic AscendC codegen did not change any files "
                     f"(round={request.round_num}, attempt={request.attempt_idx})"
                 )
-            diff_text = session.diff_text()
+            diff_text = session.project_diff_text()
+            run_in_project_dir = getattr(task, "run_benchmark_in_project_dir", None)
+            if not callable(run_in_project_dir):
+                raise RuntimeError("AscendC agentic task does not support run_benchmark_in_project_dir")
+            eval_result = run_in_project_dir(project_dir=session.project_dir, round_num=request.round_num)
+            diff_after_eval = session.project_diff_text()
+            evaluator_mutated_project = diff_after_eval != diff_text
             solution = task.make_solution_from_project_dir(
                 project_dir=session.project_dir,
                 changed_paths=changed_paths,
@@ -187,8 +206,47 @@ class AscendCAgenticCodegenRunner:
                 language="ascendc",
             )
             cleaned = {src.path: src.content for src in solution.sources or []}
+            candidate_id = f"round_{int(request.round_num):04d}_attempt_{int(request.attempt_idx):02d}"
+            snapshot_id = f"{candidate_id}_snapshot"
+            task_name = getattr(task, "definition_name", None) or getattr(task, "name", "ascendc")
+            artifacts_dir = getattr(task, "artifacts_dir", None)
+            snapshot_archive_dir = get_ksearch_artifacts_dir(base_dir=artifacts_dir, task_name=str(task_name)) / "snapshots"
+            project_snapshot = create_project_snapshot(
+                project_dir=session.project_dir,
+                snapshot_id=snapshot_id,
+                parent_snapshot_id=None,
+                base_commit=session.baseline_commit,
+                created_by_round=request.round_num,
+                eval_result=eval_result.to_dict(include_log_excerpt=True, max_log_chars=8000),
+                diff_from_parent=diff_text,
+                archive_dir=snapshot_archive_dir,
+            )
+            candidate_patch, artifact_paths = write_agentic_candidate_artifacts(
+                artifacts_dir=artifacts_dir,
+                task_name=str(task_name),
+                round_num=request.round_num,
+                attempt_idx=request.attempt_idx,
+                prompt=prompt,
+                transcript=edit_result.transcript,
+                changed_paths=changed_paths,
+                diff_text=diff_text,
+                eval_result=eval_result,
+                project_snapshot=project_snapshot,
+                parent_candidate_id=request.parent_candidate_id,
+                base_ref=session.baseline_commit,
+                project_rel_path=session.project_rel_path(),
+                action_node_id=request.action_node_id,
+                model_name=self.model_name,
+                metadata={
+                    "target_gpu": request.target_gpu,
+                    "mode": request.mode,
+                    "project_path": str(session.project_dir),
+                    "evaluator_mutated_project": evaluator_mutated_project,
+                },
+            )
             return AscendCAgenticCodegenResult(
                 solution=solution,
+                eval_result=eval_result,
                 raw=task.code_for_world_model_from_raw(raw=cleaned, language="ascendc"),
                 cleaned=cleaned,
                 transcript=edit_result.transcript,
@@ -197,6 +255,11 @@ class AscendCAgenticCodegenRunner:
                 changed_paths=changed_paths,
                 diff_text=diff_text,
                 project_path=str(session.project_dir),
+                diff_after_eval=diff_after_eval,
+                evaluator_mutated_project=evaluator_mutated_project,
+                candidate_patch=candidate_patch,
+                project_snapshot=project_snapshot,
+                artifact_paths=artifact_paths,
                 trace_path=edit_result.trace_path or telemetry_recorder.artifacts.trace_path,
                 timeline_path=edit_result.timeline_path or telemetry_recorder.artifacts.timeline_path,
                 cost_path=edit_result.cost_path or telemetry_recorder.artifacts.cost_path,

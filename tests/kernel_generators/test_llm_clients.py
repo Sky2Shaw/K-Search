@@ -946,6 +946,15 @@ def test_world_model_ascendc_codegen_uses_agentic_runner_before_prompt_construct
             )
             return AscendCAgenticCodegenResult(
                 solution=solution,
+                eval_result=EvalResult(
+                    status="passed",
+                    latency_ms=1.0,
+                    metrics={
+                        "score": 1.0,
+                        "score_name": "inv_latency",
+                        "workdir": str(tmp_path),
+                    },
+                ),
                 raw=task.code_for_world_model_from_raw(raw={src.path: src.content for src in solution.sources}, language="ascendc"),
                 cleaned={src.path: src.content for src in solution.sources},
                 transcript="edited",
@@ -1002,7 +1011,7 @@ def test_world_model_ascendc_codegen_uses_agentic_runner_before_prompt_construct
         definition_name="x",
         build_cmd="",
         test_cmd="",
-        bench_cmd="python -c \"print('latency_ms=1.0')\"",
+        bench_cmd="python -c \"raise SystemExit('should not re-evaluate Solution.sources')\"",
         timeout_seconds=30,
     )
     generator = WorldModelKernelGeneratorWithBaseline(
