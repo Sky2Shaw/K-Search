@@ -24,8 +24,8 @@ fi
 : "${BASELINE_MS:?run baseline first and export BASELINE_MS (mean_us/1000 from utils/run_perf.py)}"
 
 # --- Configurable ------------------------------------------------------------
-KSEARCH_ROOT="${KSEARCH_ROOT:-/mnt/workspace/K-Search}"
-TASK_DIR="${TASK_DIR:-/mnt/workspace/cv_agent/tile2asc/multi_query_attention}"
+KSEARCH_ROOT="${KSEARCH_ROOT:-/home/c00958677/K-Search}"
+TASK_DIR="${TASK_DIR:-/home/c00958677/cv_agent/tile2asc/multi_query_attention}"
 MODEL_NAME="${MODEL_NAME:-glm-5.1}"
 MAX_ROUNDS="${MAX_ROUNDS:-20}"
 TARGET_GPU="${TARGET_GPU:-Ascend910B3}"
@@ -33,7 +33,7 @@ TIMEOUT_S="${TIMEOUT_S:-900}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-.ksearch-output-mqa}"
 
 # Help SDK pick a reasonable HTTP timeout for long prompts.
-export API_TIMEOUT_MS="${API_TIMEOUT_MS:-1200000}"
+export API_TIMEOUT_MS="${API_TIMEOUT_MS:-3600000}"
 # Raise output cap for code-generation responses (default in SDK is 32000).
 export CLAUDE_CODE_MAX_OUTPUT_TOKENS="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-64000}"
 

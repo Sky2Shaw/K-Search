@@ -79,7 +79,7 @@ class ClaudeAgentProjectEditorClient:
                 "cwd": str(project_root),
                 "allowed_tools": list(self.allowed_tools),
                 "disallowed_tools": list(self.disallowed_tools),
-                "permission_mode": "acceptEdits",
+                "permission_mode": os.getenv("CLAUDE_AGENT_PERMISSION_MODE", "acceptEdits"),
                 "model": self.model_name,
             }
             if self.max_turns is not None:
