@@ -27,6 +27,7 @@ class MockClaudeMessage:
         content: Any = _MISSING,
         is_error: Any = _MISSING,
         subtype: Any = _MISSING,
+        **extra: Any,
     ) -> None:
         if result is not _MISSING:
             self.result = result
@@ -38,6 +39,8 @@ class MockClaudeMessage:
             self.is_error = is_error
         if subtype is not _MISSING:
             self.subtype = subtype
+        for key, value in extra.items():
+            setattr(self, key, value)
 
 
 @dataclass

@@ -23,6 +23,9 @@ from k_search.kernel_generators.llm_clients import (
     _default_claude_agent_timeout_seconds,
     _log_llm_interaction,
 )
+from k_search.telemetry.claude_sdk_adapter import event_from_claude_message
+from k_search.telemetry.events import TelemetryEvent
+from k_search.telemetry.recorder import TelemetryRecorder, noop_recorder
 
 DEFAULT_PROJECT_EDITOR_TOOLS = ["Read", "Grep", "Glob", "Edit", "Write"]
 
@@ -34,6 +37,15 @@ class ClaudeProjectEditResult:
     prompt: str
     prompt_chars: int
     prompt_lines: int
+    trace_path: str | None = None
+    timeline_path: str | None = None
+    cost_path: str | None = None
+    session_id: str | None = None
+    total_cost_usd: float | None = None
+    usage: dict[str, Any] | None = None
+    model_usage: dict[str, Any] | None = None
+    num_turns: int | None = None
+    duration_ms: int | None = None
 
 
 @dataclass
@@ -45,7 +57,7 @@ class ClaudeAgentProjectEditorClient:
     thinking_enabled: bool = field(default_factory=_default_claude_agent_thinking_enabled)
     timeout_seconds: float = field(default_factory=_default_claude_agent_timeout_seconds)
 
-    def edit_project(self, *, project_dir: str | Path, prompt: str) -> ClaudeProjectEditResult:
+    def edit_project(self, *, project_dir: str | Path, prompt: str, telemetry_recorder: TelemetryRecorder | None = None) -> ClaudeProjectEditResult:
         try:
             import claude_agent_sdk  # type: ignore
         except ImportError as exc:
@@ -57,6 +69,8 @@ class ClaudeAgentProjectEditorClient:
                 "Claude Agent SDK provider requires the 'claude-agent-sdk' package. "
                 "Install it with: pip install claude-agent-sdk"
             ) from exc
+
+        recorder = telemetry_recorder or noop_recorder()
 
         async def _run_edit() -> ClaudeProjectEditResult:
             project_root = Path(project_dir).expanduser().resolve()
@@ -77,8 +91,22 @@ class ClaudeAgentProjectEditorClient:
             final_text = ""
             try:
                 async with claude_agent_sdk.ClaudeSDKClient(options=options) as client:
+                    recorder.emit(
+                        TelemetryEvent(
+                            event_type="llm_start",
+                            provider="claude-agent",
+                            model_name=self.model_name,
+                        )
+                    )
                     await client.query(prompt_text)
+                    result_event: TelemetryEvent | None = None
                     async for message in client.receive_response():
+                        for event in event_from_claude_message(message):
+                            event.provider = event.provider or "claude-agent"
+                            event.model_name = event.model_name or self.model_name
+                            recorder.emit(event)
+                            if event.event_type == "llm_result":
+                                result_event = event
                         is_result_message = hasattr(message, "result")
                         if is_result_message:
                             ClaudeAgentLLMClient._ensure_successful_result_message(message)
@@ -91,12 +119,29 @@ class ClaudeAgentProjectEditorClient:
             except LLMProviderFatalError:
                 raise
             except Exception as exc:
+                recorder.emit(
+                    TelemetryEvent(
+                        event_type="llm_error",
+                        provider="claude-agent",
+                        model_name=self.model_name,
+                        error_type=type(exc).__name__,
+                        error_message=str(exc),
+                    )
+                )
                 provider_exc = _as_provider_exception(
                     provider="claude-agent", model_name=self.model_name, exc=exc,
                 )
                 if isinstance(provider_exc, LLMProviderFatalError):
                     raise provider_exc from exc
                 raise RuntimeError(f"Claude Agent SDK project editor failed: {exc}") from exc
+
+            recorder.emit(
+                TelemetryEvent(
+                    event_type="llm_end",
+                    provider="claude-agent",
+                    model_name=self.model_name,
+                )
+            )
 
             transcript = "\n".join(chunks).strip()
             result_text = (final_text or transcript).strip()
@@ -108,6 +153,15 @@ class ClaudeAgentProjectEditorClient:
                 prompt=prompt_text,
                 prompt_chars=len(prompt_text),
                 prompt_lines=(prompt_text.count("\n") + 1 if prompt_text else 0),
+                trace_path=recorder.artifacts.trace_path,
+                timeline_path=recorder.artifacts.timeline_path,
+                cost_path=recorder.artifacts.cost_path,
+                session_id=result_event.session_id if result_event else None,
+                total_cost_usd=result_event.total_cost_usd if result_event else None,
+                usage=result_event.usage if result_event else None,
+                model_usage=result_event.model_usage if result_event else None,
+                num_turns=result_event.num_turns if result_event else None,
+                duration_ms=result_event.duration_ms if result_event else None,
             )
 
         try:
@@ -118,6 +172,15 @@ class ClaudeAgentProjectEditorClient:
             )
             return result
         except Exception as exc:
+            recorder.emit(
+                TelemetryEvent(
+                    event_type="llm_error",
+                    provider="claude-agent",
+                    model_name=self.model_name,
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
+                )
+            )
             provider_exc = _as_provider_exception(
                 provider="claude-agent", model_name=self.model_name, exc=exc,
             )

@@ -1,9 +1,12 @@
+import json
 import shlex
 import sys
 
 from k_search.kernel_generators.kernel_generator import KernelGenerator
 from k_search.kernel_generators.llm_clients import ClaudeAgentLLMClient
 from k_search.tasks.ascendc_task import AscendCTask
+from k_search.telemetry.context import TelemetryContext
+from k_search.telemetry.recorder import build_file_recorder
 from k_search.testing import (
     MockClaudeMessage,
     install_mock_claude_agent_sdk,
@@ -131,3 +134,58 @@ def test_claude_agent_sdk_mock_drives_agentic_ascendc_two_round_optimization(
     assert "<ascendc_project>" not in sdk.client_calls[0].prompt
     assert "<ascendc_project>" not in sdk.client_calls[1].prompt
     assert sdk.client_calls[0].options.kwargs["cwd"]
+
+
+def test_claude_project_editor_writes_tool_timeline_and_cost(monkeypatch, tmp_path):
+    from pathlib import Path
+    from types import SimpleNamespace
+    from k_search.kernel_generators.claude_agent_project_editor import ClaudeAgentProjectEditorClient
+
+    (tmp_path / "project" / "kernel").mkdir(parents=True)
+    (tmp_path / "project" / "kernel" / "foo.h").write_text("alpha\nbeta\n", encoding="utf-8")
+
+    def edit_project(prompt, options, call_index):
+        project_dir = Path(options.kwargs["cwd"])
+        (project_dir / "kernel" / "foo.h").write_text("alpha\nBETA\n", encoding="utf-8")
+        return [
+            MockClaudeMessage(content=[SimpleNamespace(type="tool_use", id="toolu_1", name="Glob", input={"pattern": "**/*.h"})]),
+            MockClaudeMessage(content=[SimpleNamespace(type="tool_result", tool_use_id="toolu_1", content="kernel/foo.h", is_error=False)]),
+            MockClaudeMessage(content=[SimpleNamespace(type="tool_use", id="toolu_2", name="Read", input={"file_path": "kernel/foo.h"})]),
+            MockClaudeMessage(content=[{"type": "text", "text": "edited foo.h"}]),
+            MockClaudeMessage(
+                result="final summary",
+                session_id="sess-1",
+                total_cost_usd=0.125,
+                usage={"input_tokens": 10},
+                model_usage={"claude": {"output_tokens": 5}},
+                duration_ms=1000,
+                duration_api_ms=800,
+                num_turns=3,
+            ),
+        ]
+
+    install_mock_claude_agent_sdk(monkeypatch, responses=[edit_project])
+    recorder = build_file_recorder(
+        context=TelemetryContext(task_name="task", run_id="run", round_index=1, attempt_index=1, model_name="claude"),
+        prompt="Please edit the project.",
+        root=tmp_path / "telemetry",
+    )
+    client = ClaudeAgentProjectEditorClient(model_name="claude", timeout_seconds=30)
+
+    result = client.edit_project(
+        project_dir=tmp_path / "project",
+        prompt="Please edit the project.",
+        telemetry_recorder=recorder,
+    )
+    recorder.close()
+
+    assert result.text == "final summary"
+    assert result.trace_path == recorder.artifacts.trace_path
+    assert result.timeline_path == recorder.artifacts.timeline_path
+    assert result.cost_path == recorder.artifacts.cost_path
+    assert result.session_id == "sess-1"
+    assert result.total_cost_usd == 0.125
+    rows = [json.loads(line) for line in Path(result.trace_path).read_text(encoding="utf-8").splitlines()]
+    assert [row["event_type"] for row in rows if row["event_type"] == "tool_use"] == ["tool_use", "tool_use"]
+    assert "tool_use: Glob" in Path(result.timeline_path).read_text(encoding="utf-8")
+    assert json.loads(Path(result.cost_path).read_text(encoding="utf-8"))["summary"]["session_id"] == "sess-1"
