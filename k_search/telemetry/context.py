@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +53,7 @@ def default_run_id() -> str:
         raw = os.getenv(name, "").strip()
         if raw:
             return raw
-    return datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 
 def safe_path_component(value: Any, *, default: str, max_len: int = 96) -> str:
