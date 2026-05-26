@@ -1,12 +1,17 @@
 import json
+from pathlib import Path
 
 from k_search.telemetry.context import (
     TelemetryContext,
     build_attempt_dir,
+    default_run_id,
     is_telemetry_enabled,
+    safe_path_component,
     telemetry_root,
 )
 from k_search.telemetry.events import TelemetryEvent
+from k_search.telemetry.recorder import TelemetryRecorder, build_file_recorder, noop_recorder
+from k_search.telemetry.sinks import CostJsonSink, JsonlSink, MarkdownTimelineSink
 
 
 def test_build_attempt_dir_uses_sanitized_attempt_layout(tmp_path, monkeypatch):
@@ -72,8 +77,6 @@ def test_default_run_id_prefers_ksearch_run_id(monkeypatch):
     monkeypatch.setenv("KSEARCH_RUN_ID", "run-1")
     monkeypatch.setenv("KSEARCH_RUN_START", "run-2")
 
-    from k_search.telemetry.context import default_run_id
-
     assert default_run_id() == "run-1"
 
 
@@ -81,24 +84,18 @@ def test_default_run_id_falls_back_to_timestamp(monkeypatch):
     monkeypatch.delenv("KSEARCH_RUN_ID", raising=False)
     monkeypatch.delenv("KSEARCH_RUN_START", raising=False)
 
-    from k_search.telemetry.context import default_run_id
-
     result = default_run_id()
     assert len(result) == 15  # YYYYMMDD_HHMMSS
     assert "_" in result
 
 
 def test_safe_path_component_truncates_long_values():
-    from k_search.telemetry.context import safe_path_component
-
     long_value = "a" * 200
     result = safe_path_component(long_value, default="x")
     assert len(result) == 96
 
 
 def test_safe_path_component_uses_default_for_empty():
-    from k_search.telemetry.context import safe_path_component
-
     assert safe_path_component("", default="fallback") == "fallback"
     assert safe_path_component(None, default="fallback") == "fallback"
 
@@ -125,12 +122,6 @@ def test_telemetry_context_to_dict_omits_none():
     assert payload["round_index"] == 3
     assert "definition" not in payload
     assert "extra" not in payload
-
-
-from pathlib import Path
-
-from k_search.telemetry.recorder import TelemetryRecorder, build_file_recorder, noop_recorder
-from k_search.telemetry.sinks import CostJsonSink, JsonlSink, MarkdownTimelineSink
 
 
 def test_jsonl_sink_writes_one_event_per_line(tmp_path):
