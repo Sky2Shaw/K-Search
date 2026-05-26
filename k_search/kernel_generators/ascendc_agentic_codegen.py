@@ -11,6 +11,8 @@ from k_search.kernel_generators.claude_agent_project_editor import (
     ClaudeProjectEditResult,
 )
 from k_search.tasks.task_base import Solution
+from k_search.telemetry.context import TelemetryContext
+from k_search.telemetry.recorder import build_file_recorder
 
 
 AgenticMode = Literal["generate", "action", "debug", "improve"]
@@ -39,6 +41,15 @@ class AscendCAgenticCodegenResult:
     changed_paths: list[str]
     diff_text: str
     project_path: str
+    trace_path: str | None = None
+    timeline_path: str | None = None
+    cost_path: str | None = None
+    session_id: str | None = None
+    total_cost_usd: float | None = None
+    usage: dict[str, Any] | None = None
+    model_usage: dict[str, Any] | None = None
+    num_turns: int | None = None
+    duration_ms: int | None = None
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -46,6 +57,25 @@ def _truncate(text: str, limit: int) -> str:
     if len(s) <= limit:
         return s
     return s[: max(0, limit - 40)].rstrip() + "\n[truncated for agentic prompt budget]"
+
+
+def _edit_project_with_optional_telemetry(
+    editor_client: Any,
+    *,
+    project_dir: Path,
+    prompt: str,
+    telemetry_recorder: Any,
+) -> ClaudeProjectEditResult:
+    try:
+        return editor_client.edit_project(
+            project_dir=project_dir,
+            prompt=prompt,
+            telemetry_recorder=telemetry_recorder,
+        )
+    except TypeError as exc:
+        if "telemetry_recorder" not in str(exc):
+            raise
+        return editor_client.edit_project(project_dir=project_dir, prompt=prompt)
 
 
 class AscendCAgenticPromptBuilder:
@@ -118,10 +148,28 @@ class AscendCAgenticCodegenRunner:
                 session.commit_all("ksearch agentic overlay baseline")
 
             prompt = self.prompt_builder.build(request)
-            edit_result: ClaudeProjectEditResult = self.editor_client.edit_project(
-                project_dir=session.project_dir,
-                prompt=prompt,
+            telemetry_context = TelemetryContext(
+                task_name=getattr(task, "definition_name", None),
+                definition=getattr(task, "definition_name", None),
+                flow="agentic_codegen",
+                stage=request.mode,
+                round_index=request.round_num,
+                attempt_index=request.attempt_idx,
+                model_name=self.model_name,
+                provider="claude-agent",
+                target_gpu=request.target_gpu,
+                language="ascendc",
             )
+            telemetry_recorder = build_file_recorder(context=telemetry_context, prompt=prompt)
+            try:
+                edit_result = _edit_project_with_optional_telemetry(
+                    self.editor_client,
+                    project_dir=session.project_dir,
+                    prompt=prompt,
+                    telemetry_recorder=telemetry_recorder,
+                )
+            finally:
+                telemetry_recorder.close()
             changed_paths = session.changed_paths()
             if not changed_paths:
                 raise RuntimeError(
@@ -149,6 +197,15 @@ class AscendCAgenticCodegenRunner:
                 changed_paths=changed_paths,
                 diff_text=diff_text,
                 project_path=str(session.project_dir),
+                trace_path=edit_result.trace_path or telemetry_recorder.artifacts.trace_path,
+                timeline_path=edit_result.timeline_path or telemetry_recorder.artifacts.timeline_path,
+                cost_path=edit_result.cost_path or telemetry_recorder.artifacts.cost_path,
+                session_id=edit_result.session_id,
+                total_cost_usd=edit_result.total_cost_usd,
+                usage=edit_result.usage,
+                model_usage=edit_result.model_usage,
+                num_turns=edit_result.num_turns,
+                duration_ms=edit_result.duration_ms,
             )
         finally:
             session.cleanup()

@@ -194,3 +194,117 @@ def test_runner_overlays_base_solution_before_editing(tmp_path):
     )
 
     assert "BETA" in next(src.content for src in result.solution.sources if src.path == "kernel/foo.h")
+
+
+def test_runner_creates_attempt_telemetry_files(tmp_path, monkeypatch):
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    (task_dir / "kernel").mkdir()
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    monkeypatch.setenv("KSEARCH_TELEMETRY_DIR", str(tmp_path / "telemetry"))
+    monkeypatch.setenv("KSEARCH_RUN_ID", "run-1")
+    task = AscendCTask(task_path=task_dir, definition_name="x")
+
+    class TelemetryAwareClient:
+        def edit_project(self, *, project_dir, prompt, telemetry_recorder=None):
+            root = Path(project_dir)
+            (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+            if telemetry_recorder is not None:
+                from k_search.telemetry.events import TelemetryEvent
+
+                telemetry_recorder.emit(TelemetryEvent(event_type="llm_start", provider="claude-agent", model_name="claude"))
+                telemetry_recorder.emit(
+                    TelemetryEvent(
+                        event_type="llm_result",
+                        provider="claude-agent",
+                        model_name="claude",
+                        session_id="sess-runner",
+                        total_cost_usd=0.5,
+                        num_turns=2,
+                        duration_ms=100,
+                    )
+                )
+            return ClaudeProjectEditResult(
+                text="edited",
+                transcript="edited",
+                prompt=prompt,
+                prompt_chars=len(prompt),
+                prompt_lines=prompt.count("\n") + 1,
+                trace_path=telemetry_recorder.artifacts.trace_path if telemetry_recorder else None,
+                timeline_path=telemetry_recorder.artifacts.timeline_path if telemetry_recorder else None,
+                cost_path=telemetry_recorder.artifacts.cost_path if telemetry_recorder else None,
+                session_id="sess-runner",
+                total_cost_usd=0.5,
+                num_turns=2,
+                duration_ms=100,
+            )
+
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=TelemetryAwareClient())
+
+    result = runner.run(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text="spec",
+            action_text="change beta",
+            trace_logs="",
+            perf_summary="",
+            target_gpu="ascend_910b",
+            round_num=3,
+            attempt_idx=2,
+            mode="action",
+        ),
+        base_solution=None,
+    )
+
+    assert result.trace_path is not None
+    assert result.timeline_path is not None
+    assert result.cost_path is not None
+    assert Path(result.trace_path).exists()
+    assert Path(result.timeline_path).exists()
+    assert Path(result.cost_path).exists()
+    assert Path(result.trace_path).parent.name == "attempt_0002"
+    assert Path(result.trace_path).parent.parent.name == "action_unknown"
+    assert result.session_id == "sess-runner"
+    assert result.total_cost_usd == 0.5
+
+
+def test_runner_disables_telemetry_with_env(tmp_path, monkeypatch):
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    (task_dir / "kernel").mkdir()
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    monkeypatch.setenv("KSEARCH_TELEMETRY", "0")
+    task = AscendCTask(task_path=task_dir, definition_name="x")
+
+    class Client:
+        def edit_project(self, *, project_dir, prompt):
+            Path(project_dir, "kernel", "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+            return ClaudeProjectEditResult(
+                text="edited",
+                transcript="edited",
+                prompt=prompt,
+                prompt_chars=len(prompt),
+                prompt_lines=prompt.count("\n") + 1,
+            )
+
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=Client())
+
+    result = runner.run(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text="spec",
+            action_text="change beta",
+            trace_logs="",
+            perf_summary="",
+            target_gpu="ascend_910b",
+            round_num=1,
+            attempt_idx=1,
+            mode="action",
+        ),
+        base_solution=None,
+    )
+
+    assert result.trace_path is None
+    assert result.timeline_path is None
+    assert result.cost_path is None
+    assert result.changed_paths == ["kernel/foo.h"]
