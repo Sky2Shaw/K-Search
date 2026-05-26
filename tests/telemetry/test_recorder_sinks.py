@@ -125,3 +125,106 @@ def test_telemetry_context_to_dict_omits_none():
     assert payload["round_index"] == 3
     assert "definition" not in payload
     assert "extra" not in payload
+
+
+from pathlib import Path
+
+from k_search.telemetry.recorder import TelemetryRecorder, build_file_recorder, noop_recorder
+from k_search.telemetry.sinks import CostJsonSink, JsonlSink, MarkdownTimelineSink
+
+
+def test_jsonl_sink_writes_one_event_per_line(tmp_path):
+    path = tmp_path / "agent_trace.jsonl"
+    sink = JsonlSink(path)
+    sink.write_event(TelemetryEvent(event_type="llm_start", model_name="claude"))
+    sink.write_event(TelemetryEvent(event_type="tool_use", tool_name="Glob", tool_input={"pattern": "**/*.h"}))
+    sink.close()
+
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert [row["event_type"] for row in rows] == ["llm_start", "tool_use"]
+    assert rows[1]["tool_name"] == "Glob"
+
+
+def test_markdown_timeline_sink_formats_tool_events(tmp_path):
+    path = tmp_path / "tool_timeline.md"
+    sink = MarkdownTimelineSink(path)
+    sink.write_event(TelemetryEvent(event_type="llm_start", provider="claude-agent", model_name="claude"))
+    sink.write_event(TelemetryEvent(event_type="tool_use", tool_name="Read", tool_input={"file_path": "kernel/foo.h"}))
+    sink.write_event(TelemetryEvent(event_type="tool_result", tool_name="Read", tool_result_excerpt="alpha"))
+    sink.close()
+
+    text = path.read_text(encoding="utf-8")
+    assert "# Claude Agent Timeline" in text
+    assert "tool_use: Read" in text
+    assert "kernel/foo.h" in text
+    assert "tool_result" in text
+
+
+def test_cost_sink_writes_latest_result_on_close(tmp_path):
+    path = tmp_path / "cost.json"
+    sink = CostJsonSink(path)
+    sink.write_event(TelemetryEvent(event_type="llm_start", model_name="claude"))
+    sink.write_event(
+        TelemetryEvent(
+            event_type="llm_result",
+            provider="claude-agent",
+            model_name="claude",
+            session_id="sess-1",
+            total_cost_usd=0.125,
+            duration_ms=1000,
+            duration_api_ms=800,
+            num_turns=3,
+            usage={"input_tokens": 10},
+            model_usage={"claude": {"output_tokens": 5}},
+        )
+    )
+    sink.close()
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["summary"]["session_id"] == "sess-1"
+    assert payload["summary"]["total_cost_usd"] == 0.125
+    assert payload["usage"] == {"input_tokens": 10}
+
+
+def test_recorder_merges_context_and_swallows_sink_errors(tmp_path):
+    class BrokenSink:
+        def write_event(self, event):
+            raise RuntimeError("disk unhappy")
+
+        def close(self):
+            raise RuntimeError("close unhappy")
+
+    path = tmp_path / "trace.jsonl"
+    context = TelemetryContext(task_name="x", round_index=4)
+    recorder = TelemetryRecorder(context=context, sinks=[BrokenSink(), JsonlSink(path)])
+
+    recorder.emit(TelemetryEvent(event_type="tool_use", tool_name="Grep"))
+    recorder.close()
+
+    row = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    assert row["context"]["task_name"] == "x"
+    assert row["context"]["round_index"] == 4
+    assert row["tool_name"] == "Grep"
+
+
+def test_build_file_recorder_creates_prompt_and_artifact_paths(tmp_path):
+    context = TelemetryContext(task_name="task", run_id="run", round_index=1, attempt_index=1)
+
+    recorder = build_file_recorder(context=context, prompt="hello prompt", root=tmp_path)
+    recorder.close()
+
+    assert recorder.artifacts.trace_path is not None
+    assert recorder.artifacts.timeline_path is not None
+    assert recorder.artifacts.cost_path is not None
+    attempt_dir = Path(recorder.artifacts.trace_path).parent
+    assert (attempt_dir / "prompt.md").read_text(encoding="utf-8") == "hello prompt"
+
+
+def test_noop_recorder_has_empty_artifacts():
+    recorder = noop_recorder()
+
+    recorder.emit(TelemetryEvent(event_type="llm_start"))
+    recorder.close()
+
+    assert recorder.artifacts.trace_path is None
+    assert recorder.events == []
