@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from k_search.telemetry.events import TelemetryEvent
+from k_search.telemetry.events import TelemetryEvent, _json_safe
 
 
 def event_from_claude_message(message: Any) -> list[TelemetryEvent]:
@@ -114,16 +114,6 @@ def _safe_mapping(value: Any) -> dict[str, Any] | None:
         if isinstance(dumped, dict):
             return {str(key): _json_safe(item) for key, item in dumped.items()}
     return {"value": _json_safe(value)}
-
-
-def _json_safe(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, dict):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
-    return str(value)
 
 
 def _assistant_text_excerpt(text: Any) -> str | None:
