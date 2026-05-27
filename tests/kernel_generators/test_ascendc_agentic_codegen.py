@@ -372,3 +372,51 @@ def test_runner_disables_telemetry_with_env(tmp_path, monkeypatch):
     assert result.timeline_path is None
     assert result.cost_path is None
     assert result.changed_paths == ["kernel/foo.h"]
+
+
+def test_prompt_builder_sanitizes_original_task_paths(tmp_path):
+    """Prompt must replace original project dir paths with worktree paths."""
+    original_dir = tmp_path / "original_project"
+    original_dir.mkdir()
+    worktree_dir = tmp_path / "worktree_project"
+
+    builder = AscendCAgenticPromptBuilder(max_chars=20_000)
+    request = AscendCAgenticCodegenRequest(
+        definition_text=f"Task: x\nSpecification source: {original_dir}/ksearch_task.md\nSpecification:\nSee {original_dir}/kernel/foo.h for details.",
+        action_text="Optimize the kernel.",
+        trace_logs="",
+        perf_summary="",
+        target_gpu="ascend_910b",
+        round_num=1,
+        attempt_idx=1,
+        mode="action",
+    )
+
+    prompt = builder.build(
+        request,
+        project_dir=worktree_dir,
+        original_task_path=original_dir,
+    )
+
+    assert str(original_dir) not in prompt
+    assert str(worktree_dir) in prompt
+    assert "Specification source:" in prompt
+
+
+def test_prompt_builder_includes_cwd_only_instruction():
+    """Prompt must contain the CWD-only constraint instruction."""
+    builder = AscendCAgenticPromptBuilder(max_chars=20_000)
+    request = AscendCAgenticCodegenRequest(
+        definition_text="Task: x",
+        action_text="change code",
+        trace_logs="",
+        perf_summary="",
+        target_gpu="ascend_910b",
+        round_num=1,
+        attempt_idx=1,
+        mode="action",
+    )
+
+    prompt = builder.build(request)
+
+    assert "ONLY edit files inside the current project directory" in prompt

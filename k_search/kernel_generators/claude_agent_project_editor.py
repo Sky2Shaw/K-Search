@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
+import os
 
 from k_search.kernel_generators.llm_clients import (
     ClaudeAgentLLMClient,
