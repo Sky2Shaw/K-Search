@@ -16,6 +16,7 @@ from k_search.kernel_generators.project_snapshot import ProjectSnapshot, create_
 from k_search.tasks.task_base import EvalResult, Solution
 from k_search.telemetry.context import TelemetryContext
 from k_search.telemetry.recorder import build_file_recorder
+from k_search.utils.path_sanitize import sanitize_worktree_paths
 from k_search.utils.paths import get_ksearch_artifacts_dir
 
 
@@ -97,13 +98,7 @@ class AscendCAgenticPromptBuilder:
             max_chars = int(raw) if raw.isdigit() and int(raw) > 0 else 20_000
         self.max_chars = int(max_chars)
 
-    def build(
-        self,
-        request: AscendCAgenticCodegenRequest,
-        *,
-        project_dir: Path | str | None = None,
-        original_task_path: Path | str | None = None,
-    ) -> str:
+    def build(self, request: AscendCAgenticCodegenRequest) -> str:
         sections = {
             "definition": _truncate(request.definition_text, 5000),
             "action": _truncate(request.action_text, 3000),
@@ -132,12 +127,8 @@ class AscendCAgenticPromptBuilder:
             "Recent failure or trace excerpt:\n"
             f"{sections['trace_logs'] or '(none)'}\n"
         )
-        # Sanitize absolute paths: replace original project dir with worktree dir
-        if project_dir and original_task_path:
-            original = str(Path(original_task_path).expanduser().resolve())
-            replacement = str(Path(project_dir).expanduser().resolve())
-            if original != replacement:
-                prompt = prompt.replace(original, replacement)
+        # 不变量:送达 LLM 的文本不得携带物理 worktree 路径,统一抹成语义占位符。
+        prompt = sanitize_worktree_paths(prompt)
         if len(prompt) > self.max_chars:
             sizes = ", ".join(f"{name}={len(value)}" for name, value in sorted(sections.items()))
             raise ValueError(
@@ -172,11 +163,7 @@ class AscendCAgenticCodegenRunner:
                 overlay(project_dir=session.project_dir, solution=base_solution)
                 session.commit_all("ksearch agentic overlay baseline")
 
-            prompt = self.prompt_builder.build(
-                request,
-                project_dir=session.project_dir,
-                original_task_path=getattr(task, "task_path", None),
-            )
+            prompt = self.prompt_builder.build(request)
             telemetry_context = TelemetryContext(
                 task_name=getattr(task, "definition_name", None),
                 definition=getattr(task, "definition_name", None),

@@ -662,3 +662,21 @@ def test_solution_from_raw_code_for_agentic_parses_full_container_without_advanc
     assert task._last_parsed_files is None
     assert task._last_parsed_raw is None
     assert task._patch_failure_streak == 0
+
+
+def test_truncate_log_sanitizes_worktree_paths():
+    logs = [
+        "[workdir] /tmp/ksearch_agentic_worktree_02ut4r9r/tile2asc/mqa",
+        "-- Build files: /tmp/ksearch_agentic_worktree_02ut4r9r/kernel/build",
+    ]
+    out = AscendCTask._truncate_log(logs)
+    assert "ksearch_agentic_worktree_02ut4r9r" not in out
+    assert "<PROJECT_ROOT>" in out
+
+
+def test_truncate_log_sanitizes_before_truncation():
+    # 占位符必须在截断前替换,不能被 max_chars 拦腰截断破坏。
+    logs = ["/tmp/ksearch_agentic_worktree_02ut4r9r/" + "x" * 50]
+    out = AscendCTask._truncate_log(logs, max_chars=20)
+    assert "ksearch_agentic_worktree_02ut4r9r" not in out
+    assert out.startswith("<PROJECT_ROOT>")
