@@ -665,8 +665,6 @@ def test_solution_from_raw_code_for_agentic_parses_full_container_without_advanc
 
 
 def test_truncate_log_sanitizes_worktree_paths():
-    from k_search.tasks.ascendc_task import AscendCTask
-
     logs = [
         "[workdir] /tmp/ksearch_agentic_worktree_02ut4r9r/tile2asc/mqa",
         "-- Build files: /tmp/ksearch_agentic_worktree_02ut4r9r/kernel/build",
@@ -677,8 +675,6 @@ def test_truncate_log_sanitizes_worktree_paths():
 
 
 def test_truncate_log_sanitizes_before_truncation():
-    from k_search.tasks.ascendc_task import AscendCTask
-
     # 占位符必须在截断前替换,不能被 max_chars 拦腰截断破坏。
     logs = ["/tmp/ksearch_agentic_worktree_02ut4r9r/" + "x" * 50]
     out = AscendCTask._truncate_log(logs, max_chars=20)
