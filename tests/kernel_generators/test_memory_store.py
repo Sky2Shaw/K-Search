@@ -40,3 +40,19 @@ def test_kind_is_generic(tmp_path):
     store.save(plan, "step 1\n")
     assert store.load(plan) == "step 1\n"
     assert store.load(CODE_MAP) is None  # kinds are isolated
+
+
+def test_save_code_map_if_adopted_only_on_new_best(tmp_path):
+    from k_search.kernel_generators.memory import CODE_MAP, MemoryStore, save_code_map_if_adopted
+
+    class _Task:
+        artifacts_dir = str(tmp_path / "artifacts")
+        definition_name = "opx"
+
+    task = _Task()
+    save_code_map_if_adopted(task=task, code_map_text="A\n", adopted=False)
+    assert MemoryStore.for_task(task).load(CODE_MAP) is None
+    save_code_map_if_adopted(task=task, code_map_text="B\n", adopted=True)
+    assert MemoryStore.for_task(task).load(CODE_MAP) == "B\n"
+    save_code_map_if_adopted(task=task, code_map_text=None, adopted=True)
+    assert MemoryStore.for_task(task).load(CODE_MAP) == "B\n"

@@ -435,6 +435,12 @@ class KernelGenerator:
             f"changed_files={','.join(result.changed_paths)} project_path={result.project_path}",
             flush=True,
         )
+        from k_search.kernel_generators.memory import save_code_map_if_adopted
+        save_code_map_if_adopted(
+            task=task,
+            code_map_text=getattr(result, "code_map_text", None),
+            adopted=bool(getattr(result.eval_result, "is_passed", lambda: False)()),
+        )
         return result
 
     def generate(  # type: ignore[override]

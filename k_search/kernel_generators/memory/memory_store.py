@@ -64,3 +64,10 @@ class MemoryStore:
             return None
         text = p.read_text(encoding="utf-8", errors="replace")
         return text if text.strip() else None
+
+
+def save_code_map_if_adopted(*, task: object, code_map_text: str | None, adopted: bool) -> None:
+    """Write code_map back to artifacts only when the attempt was adopted (new best)."""
+    if not adopted or not code_map_text or not str(code_map_text).strip():
+        return
+    MemoryStore.for_task(task).save(CODE_MAP, code_map_text)
