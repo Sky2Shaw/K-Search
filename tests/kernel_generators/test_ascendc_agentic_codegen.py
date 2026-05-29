@@ -19,6 +19,14 @@ def _py_cmd(code: str) -> str:
     return f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
 
 
+@pytest.fixture(autouse=True)
+def _code_map_disabled_by_default(monkeypatch):
+    # Keep agentic runner tests hermetic and fast: with code_map enabled the runner
+    # would fire a real CodeReaderAgent SDK call on the first round. Tests that
+    # exercise code_map opt back in with monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1").
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "0")
+
+
 class EditingClient:
     def __init__(self, new_text: str):
         self.new_text = new_text
@@ -470,7 +478,9 @@ def test_runner_generates_and_persists_code_map_on_first_round(tmp_path, monkeyp
             )
 
     client = ReaderClient()
-    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=client)
+    runner = AscendCAgenticCodegenRunner(
+        model_name="claude", editor_client=client, reader_editor_client=client
+    )
     result = runner.run(
         task=task,
         request=AscendCAgenticCodegenRequest(
@@ -515,7 +525,9 @@ def test_runner_reuses_existing_code_map_without_reader(tmp_path, monkeypatch):
             )
 
     client = CodegenOnlyClient()
-    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=client)
+    runner = AscendCAgenticCodegenRunner(
+        model_name="claude", editor_client=client, reader_editor_client=client
+    )
     result = runner.run(
         task=task,
         request=AscendCAgenticCodegenRequest(
@@ -548,3 +560,40 @@ def test_runner_code_map_disabled_keeps_legacy_behavior(tmp_path, monkeypatch):
     assert "First inspect the project" in client.calls[0][1]
     assert "CODE_MAP.md" not in client.calls[0][1]
     assert result.code_map_text is None
+
+
+def test_runner_code_map_not_in_diff(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
+
+    class C:
+        def edit_project(self, *, project_dir, prompt, telemetry_recorder=None):
+            root = Path(project_dir)
+            if "CODE_MAP.md using EXACTLY" in prompt:
+                (root / "CODE_MAP.md").write_text("# CODE_MAP\nmapped\n", encoding="utf-8")
+                t = "wrote map"
+            else:
+                (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+                t = "edited"
+            return ClaudeProjectEditResult(
+                text=t, transcript=t, prompt=prompt,
+                prompt_chars=len(prompt), prompt_lines=prompt.count("\n") + 1,
+            )
+
+    c = C()
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=c, reader_editor_client=c)
+    result = runner.run(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+            target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action",
+        ),
+        base_solution=None,
+    )
+    assert "CODE_MAP.md" not in result.diff_text
+    assert "kernel/foo.h" in result.diff_text
+    if result.project_snapshot is not None:
+        assert "CODE_MAP.md" not in result.project_snapshot.manifest

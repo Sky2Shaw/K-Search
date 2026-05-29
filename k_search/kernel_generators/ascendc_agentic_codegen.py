@@ -153,10 +153,12 @@ class AscendCAgenticCodegenRunner:
         *,
         model_name: str,
         editor_client: Any | None = None,
+        reader_editor_client: Any | None = None,
         prompt_builder: AscendCAgenticPromptBuilder | None = None,
     ) -> None:
         self.model_name = str(model_name)
         self.editor_client = editor_client or ClaudeAgentProjectEditorClient(model_name=self.model_name)
+        self.reader_editor_client = reader_editor_client
         self.prompt_builder = prompt_builder or AscendCAgenticPromptBuilder()
 
     def run(
@@ -187,7 +189,7 @@ class AscendCAgenticCodegenRunner:
                 if store.load(CODE_MAP) is None:
                     try:
                         reader = CodeReaderAgent(
-                            model_name=self.model_name, editor_client=self.editor_client
+                            model_name=self.model_name, editor_client=self.reader_editor_client
                         )
                         reader.run(
                             project_dir=session.project_dir,
@@ -225,6 +227,9 @@ class AscendCAgenticCodegenRunner:
                 )
             finally:
                 telemetry_recorder.close()
+            code_map_text = store.read_from_worktree(CODE_MAP, session.project_dir) if store is not None else None
+            if store is not None:
+                (session.project_dir / CODE_MAP.filename).unlink(missing_ok=True)
             project_changed_paths = session.project_changed_paths()
             changed_paths = project_changed_paths or session.changed_paths()
             changed_paths = [p for p in changed_paths if p != CODE_MAP.filename]
@@ -287,9 +292,6 @@ class AscendCAgenticCodegenRunner:
                     "project_path": str(session.project_dir),
                     "evaluator_mutated_project": evaluator_mutated_project,
                 },
-            )
-            code_map_text = (
-                store.read_from_worktree(CODE_MAP, session.project_dir) if store is not None else None
             )
             return AscendCAgenticCodegenResult(
                 solution=solution,
