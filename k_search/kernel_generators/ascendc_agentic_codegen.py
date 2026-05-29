@@ -204,7 +204,15 @@ class AscendCAgenticCodegenRunner:
                         warnings.warn(f"code_map reader failed, continuing without it: {exc}")
                 has_code_map = store.materialize(CODE_MAP, session.project_dir)
 
-            prompt = self.prompt_builder.build(request, has_code_map=has_code_map)
+            from k_search.kernel_generators.agents import CodegenAgent  # lazy import: avoid module-top cycle
+
+            codegen = CodegenAgent(
+                model_name=self.model_name,
+                editor_client=self.editor_client,
+                prompt_builder=self.prompt_builder,
+            )
+            codegen_context = {"request": request, "has_code_map": has_code_map}
+            prompt = codegen.build_prompt(codegen_context)
             telemetry_context = TelemetryContext(
                 task_name=getattr(task, "definition_name", None),
                 definition=getattr(task, "definition_name", None),
@@ -219,12 +227,12 @@ class AscendCAgenticCodegenRunner:
             )
             telemetry_recorder = build_file_recorder(context=telemetry_context, prompt=prompt)
             try:
-                edit_result = _edit_project_with_optional_telemetry(
-                    self.editor_client,
+                agent_result = codegen.run(
                     project_dir=session.project_dir,
-                    prompt=prompt,
+                    context=codegen_context,
                     telemetry_recorder=telemetry_recorder,
                 )
+                edit_result = agent_result.edit_result
             finally:
                 telemetry_recorder.close()
             code_map_text = store.read_from_worktree(CODE_MAP, session.project_dir) if store is not None else None
