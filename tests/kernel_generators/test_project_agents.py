@@ -36,3 +36,11 @@ def test_project_agent_subclass_declares_tools():
     agent = _Echo(model_name="claude", editor_client=FakeClient())
     assert agent.allowed_tools == ["Read", "Grep"]
     assert "Bash" in agent.disallowed_tools
+
+
+def test_tool_lists_are_instance_isolated():
+    a = _Echo(model_name="claude", editor_client=FakeClient())
+    b = _Echo(model_name="claude", editor_client=FakeClient())
+    a.allowed_tools.append("DANGEROUS")
+    assert "DANGEROUS" not in b.allowed_tools
+    assert "DANGEROUS" not in _Echo.allowed_tools

@@ -29,10 +29,12 @@ class ProjectAgent:
 
     def __init__(self, *, model_name: str, editor_client: Any | None = None) -> None:
         self.model_name = str(model_name)
+        self.allowed_tools = list(type(self).allowed_tools)
+        self.disallowed_tools = list(type(self).disallowed_tools)
         self.editor_client = editor_client or ClaudeAgentProjectEditorClient(
             model_name=self.model_name,
-            allowed_tools=list(self.allowed_tools),
-            disallowed_tools=list(self.disallowed_tools),
+            allowed_tools=self.allowed_tools,
+            disallowed_tools=self.disallowed_tools,
         )
 
     def build_prompt(self, context: Any) -> str:  # pragma: no cover - abstract
