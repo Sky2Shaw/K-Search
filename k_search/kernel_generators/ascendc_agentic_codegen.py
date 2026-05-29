@@ -8,6 +8,7 @@ from typing import Any, Literal
 from k_search.kernel_generators.agentic_candidate_artifacts import write_agentic_candidate_artifacts
 from k_search.kernel_generators.agentic_worktree import create_agentic_worktree
 from k_search.kernel_generators.candidate_patch import CandidatePatch
+from k_search.kernel_generators.memory import CODE_MAP, MemoryStore
 from k_search.kernel_generators.claude_agent_project_editor import (
     ClaudeAgentProjectEditorClient,
     ClaudeProjectEditResult,
@@ -63,6 +64,7 @@ class AscendCAgenticCodegenResult:
     model_usage: dict[str, Any] | None = None
     num_turns: int | None = None
     duration_ms: int | None = None
+    code_map_text: str | None = None
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -98,13 +100,21 @@ class AscendCAgenticPromptBuilder:
             max_chars = int(raw) if raw.isdigit() and int(raw) > 0 else 20_000
         self.max_chars = int(max_chars)
 
-    def build(self, request: AscendCAgenticCodegenRequest) -> str:
+    def build(self, request: AscendCAgenticCodegenRequest, *, has_code_map: bool = False) -> str:
         sections = {
             "definition": _truncate(request.definition_text, 5000),
             "action": _truncate(request.action_text, 3000),
             "perf_summary": _truncate(request.perf_summary, 2500),
             "trace_logs": _truncate(request.trace_logs, 4000),
         }
+        if has_code_map:
+            inspect_line = (
+                "A CODE_MAP.md at the project root describes file roles, kernel structure, "
+                "tiling, buffers, and contracts. Read it first instead of grepping the whole project. "
+                "After editing code, update the affected sections of CODE_MAP.md to keep it accurate.\n"
+            )
+        else:
+            inspect_line = "First inspect the project with Glob, Grep, and Read. Then edit only necessary files.\n"
         prompt = (
             "You are an AscendC performance optimization agent working inside a candidate project directory.\n"
             "IMPORTANT: You must ONLY edit files inside the current project directory (CWD). Do NOT use absolute paths from any external directories.\n"
@@ -113,8 +123,8 @@ class AscendCAgenticPromptBuilder:
             f"Round: {int(request.round_num)}\n"
             f"Attempt: {int(request.attempt_idx)}\n\n"
             "Available tools: Read/Grep/Glob/Edit/Write. Bash is disabled.\n"
-            "First inspect the project with Glob, Grep, and Read. Then edit only necessary files.\n"
-            "Do not read or modify .git, build directories, caches, generated logs, or large artifacts.\n"
+            + inspect_line
+            + "Do not read or modify .git, build directories, caches, generated logs, or large artifacts.\n"
             "Preserve operator semantics, public entry points, host tiling contract, correctness harness behavior, and build layout.\n"
             "Do not return a full source container. Modify files in the project directory.\n"
             "End with a concise summary and changed-file list.\n\n"
@@ -143,10 +153,12 @@ class AscendCAgenticCodegenRunner:
         *,
         model_name: str,
         editor_client: Any | None = None,
+        reader_editor_client: Any | None = None,
         prompt_builder: AscendCAgenticPromptBuilder | None = None,
     ) -> None:
         self.model_name = str(model_name)
         self.editor_client = editor_client or ClaudeAgentProjectEditorClient(model_name=self.model_name)
+        self.reader_editor_client = reader_editor_client
         self.prompt_builder = prompt_builder or AscendCAgenticPromptBuilder()
 
     def run(
@@ -163,7 +175,44 @@ class AscendCAgenticCodegenRunner:
                 overlay(project_dir=session.project_dir, solution=base_solution)
                 session.commit_all("ksearch agentic overlay baseline")
 
-            prompt = self.prompt_builder.build(request)
+            code_map_enabled = os.getenv("KSEARCH_ENABLE_CODE_MAP", "1").strip().lower() not in {
+                "0",
+                "false",
+                "no",
+                "off",
+            }
+            store = MemoryStore.for_task(task) if code_map_enabled else None
+            has_code_map = False
+            if store is not None:
+                from k_search.kernel_generators.agents import CodeReaderAgent
+
+                if store.load(CODE_MAP) is None:
+                    try:
+                        reader = CodeReaderAgent(
+                            model_name=self.model_name, editor_client=self.reader_editor_client
+                        )
+                        reader.run(
+                            project_dir=session.project_dir,
+                            context={"definition_text": request.definition_text},
+                        )
+                        produced = store.read_from_worktree(CODE_MAP, session.project_dir)
+                        if produced:
+                            store.save(CODE_MAP, produced)
+                    except Exception as exc:  # noqa: BLE001 - code map is best-effort
+                        import warnings
+
+                        warnings.warn(f"code_map reader failed, continuing without it: {exc}")
+                has_code_map = store.materialize(CODE_MAP, session.project_dir)
+
+            from k_search.kernel_generators.agents import CodegenAgent  # lazy import: avoid module-top cycle
+
+            codegen = CodegenAgent(
+                model_name=self.model_name,
+                editor_client=self.editor_client,
+                prompt_builder=self.prompt_builder,
+            )
+            codegen_context = {"request": request, "has_code_map": has_code_map}
+            prompt = codegen.build_prompt(codegen_context)
             telemetry_context = TelemetryContext(
                 task_name=getattr(task, "definition_name", None),
                 definition=getattr(task, "definition_name", None),
@@ -178,16 +227,20 @@ class AscendCAgenticCodegenRunner:
             )
             telemetry_recorder = build_file_recorder(context=telemetry_context, prompt=prompt)
             try:
-                edit_result = _edit_project_with_optional_telemetry(
-                    self.editor_client,
+                agent_result = codegen.run(
                     project_dir=session.project_dir,
-                    prompt=prompt,
+                    context=codegen_context,
                     telemetry_recorder=telemetry_recorder,
                 )
+                edit_result = agent_result.edit_result
             finally:
                 telemetry_recorder.close()
+            code_map_text = store.read_from_worktree(CODE_MAP, session.project_dir) if store is not None else None
+            if store is not None:
+                (session.project_dir / CODE_MAP.filename).unlink(missing_ok=True)
             project_changed_paths = session.project_changed_paths()
             changed_paths = project_changed_paths or session.changed_paths()
+            changed_paths = [p for p in changed_paths if p != CODE_MAP.filename]
             if not changed_paths:
                 raise RuntimeError(
                     "Claude agentic AscendC codegen did not change any files "
@@ -273,6 +326,7 @@ class AscendCAgenticCodegenRunner:
                 model_usage=edit_result.model_usage,
                 num_turns=edit_result.num_turns,
                 duration_ms=edit_result.duration_ms,
+                code_map_text=code_map_text,
             )
         finally:
             session.cleanup()
