@@ -44,3 +44,18 @@ def test_tool_lists_are_instance_isolated():
     a.allowed_tools.append("DANGEROUS")
     assert "DANGEROUS" not in b.allowed_tools
     assert "DANGEROUS" not in _Echo.allowed_tools
+
+
+def test_code_reader_agent_tools_and_prompt(tmp_path):
+    from k_search.kernel_generators.agents import CodeReaderAgent
+
+    agent = CodeReaderAgent(model_name="claude", editor_client=FakeClient(), max_chars=1234)
+    assert agent.allowed_tools == ["Read", "Grep", "Glob", "Write"]
+    assert "Edit" not in agent.allowed_tools
+
+    prompt = agent.build_prompt({"definition_text": "Vector add operator."})
+    assert "CODE_MAP.md" in prompt
+    assert "MUST NOT modify" in prompt
+    assert "Vector add operator." in prompt
+    assert "1234" in prompt  # max_chars injected
+    assert "# CODE_MAP" in prompt  # template anchor
