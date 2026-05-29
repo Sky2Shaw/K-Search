@@ -30,6 +30,7 @@ from k_search.tasks.task_base import (
     load_ksearch_solution_json,
     solution_from_json_dict,
 )
+from k_search.utils.path_sanitize import sanitize_worktree_paths
 
 
 _FILE_BLOCK_RE = re.compile(
@@ -807,7 +808,7 @@ Generate the corrected and optimized implementation:"""
 
     @staticmethod
     def _truncate_log(logs: list[str], *, max_chars: int = 8000) -> str:
-        text = "\n\n".join(str(x) for x in logs)
+        text = sanitize_worktree_paths("\n\n".join(str(x) for x in logs))
         if len(text) > max_chars:
             return text[:max_chars] + "\n...<truncated>..."
         return text
