@@ -375,10 +375,9 @@ def test_runner_disables_telemetry_with_env(tmp_path, monkeypatch):
 
 
 def test_prompt_builder_replaces_paths_with_placeholder(tmp_path):
-    """Prompt must NOT inject any physical path; original dirs become a placeholder."""
+    """Prompt must NOT inject physical worktree paths; they become a placeholder."""
+    # 本次范围:仅净化 worktree 临时路径(来自 trace_logs);definition 中用户 task_path 的原始绝对路径不在本次根治范围(见 spec §4.4)。
     original_dir = tmp_path / "original_project"
-    original_dir.mkdir()
-    worktree_dir = tmp_path / "worktree_project"
 
     builder = AscendCAgenticPromptBuilder(max_chars=20_000)
     request = AscendCAgenticCodegenRequest(
@@ -395,15 +394,9 @@ def test_prompt_builder_replaces_paths_with_placeholder(tmp_path):
         mode="action",
     )
 
-    prompt = builder.build(
-        request,
-        project_dir=worktree_dir,
-        original_task_path=original_dir,
-    )
+    prompt = builder.build(request)
 
-    # 既不注入旧 worktree 物理路径,也不注入当前 worktree 物理路径。
     assert "ksearch_agentic_worktree_02ut4r9r" not in prompt
-    assert str(worktree_dir) not in prompt
     assert "<PROJECT_ROOT>" in prompt
     assert "Specification source:" in prompt
 

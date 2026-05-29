@@ -98,13 +98,7 @@ class AscendCAgenticPromptBuilder:
             max_chars = int(raw) if raw.isdigit() and int(raw) > 0 else 20_000
         self.max_chars = int(max_chars)
 
-    def build(
-        self,
-        request: AscendCAgenticCodegenRequest,
-        *,
-        project_dir: Path | str | None = None,
-        original_task_path: Path | str | None = None,
-    ) -> str:
+    def build(self, request: AscendCAgenticCodegenRequest) -> str:
         sections = {
             "definition": _truncate(request.definition_text, 5000),
             "action": _truncate(request.action_text, 3000),
@@ -169,11 +163,7 @@ class AscendCAgenticCodegenRunner:
                 overlay(project_dir=session.project_dir, solution=base_solution)
                 session.commit_all("ksearch agentic overlay baseline")
 
-            prompt = self.prompt_builder.build(
-                request,
-                project_dir=session.project_dir,
-                original_task_path=getattr(task, "task_path", None),
-            )
+            prompt = self.prompt_builder.build(request)
             telemetry_context = TelemetryContext(
                 task_name=getattr(task, "definition_name", None),
                 definition=getattr(task, "definition_name", None),
