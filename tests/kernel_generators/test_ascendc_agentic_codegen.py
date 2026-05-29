@@ -374,17 +374,20 @@ def test_runner_disables_telemetry_with_env(tmp_path, monkeypatch):
     assert result.changed_paths == ["kernel/foo.h"]
 
 
-def test_prompt_builder_sanitizes_original_task_paths(tmp_path):
-    """Prompt must replace original project dir paths with worktree paths."""
+def test_prompt_builder_replaces_paths_with_placeholder(tmp_path):
+    """Prompt must NOT inject any physical path; original dirs become a placeholder."""
     original_dir = tmp_path / "original_project"
     original_dir.mkdir()
     worktree_dir = tmp_path / "worktree_project"
 
     builder = AscendCAgenticPromptBuilder(max_chars=20_000)
     request = AscendCAgenticCodegenRequest(
-        definition_text=f"Task: x\nSpecification source: {original_dir}/ksearch_task.md\nSpecification:\nSee {original_dir}/kernel/foo.h for details.",
+        definition_text=(
+            f"Task: x\nSpecification source: {original_dir}/ksearch_task.md\n"
+            f"Specification:\nSee {original_dir}/kernel/foo.h for details."
+        ),
         action_text="Optimize the kernel.",
-        trace_logs="",
+        trace_logs="[workdir] /tmp/ksearch_agentic_worktree_02ut4r9r/kernel/x.cpp",
         perf_summary="",
         target_gpu="ascend_910b",
         round_num=1,
@@ -398,8 +401,10 @@ def test_prompt_builder_sanitizes_original_task_paths(tmp_path):
         original_task_path=original_dir,
     )
 
-    assert str(original_dir) not in prompt
-    assert str(worktree_dir) in prompt
+    # 既不注入旧 worktree 物理路径,也不注入当前 worktree 物理路径。
+    assert "ksearch_agentic_worktree_02ut4r9r" not in prompt
+    assert str(worktree_dir) not in prompt
+    assert "<PROJECT_ROOT>" in prompt
     assert "Specification source:" in prompt
 
 
