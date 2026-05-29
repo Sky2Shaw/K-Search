@@ -418,3 +418,26 @@ def test_prompt_builder_includes_cwd_only_instruction():
     prompt = builder.build(request)
 
     assert "ONLY edit files inside the current project directory" in prompt
+
+
+def test_prompt_builder_uses_code_map_branch_when_present():
+    builder = AscendCAgenticPromptBuilder(max_chars=20_000)
+    request = AscendCAgenticCodegenRequest(
+        definition_text="Task: x",
+        action_text="optimize",
+        trace_logs="",
+        perf_summary="",
+        target_gpu="ascend_910b",
+        round_num=1,
+        attempt_idx=1,
+        mode="action",
+    )
+
+    with_map = builder.build(request, has_code_map=True)
+    without_map = builder.build(request, has_code_map=False)
+
+    assert "CODE_MAP.md" in with_map
+    assert "Read it first" in with_map
+    assert "update the affected sections" in with_map
+    assert "CODE_MAP.md" not in without_map
+    assert "First inspect the project with Glob, Grep, and Read" in without_map

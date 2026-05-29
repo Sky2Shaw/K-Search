@@ -98,13 +98,21 @@ class AscendCAgenticPromptBuilder:
             max_chars = int(raw) if raw.isdigit() and int(raw) > 0 else 20_000
         self.max_chars = int(max_chars)
 
-    def build(self, request: AscendCAgenticCodegenRequest) -> str:
+    def build(self, request: AscendCAgenticCodegenRequest, *, has_code_map: bool = False) -> str:
         sections = {
             "definition": _truncate(request.definition_text, 5000),
             "action": _truncate(request.action_text, 3000),
             "perf_summary": _truncate(request.perf_summary, 2500),
             "trace_logs": _truncate(request.trace_logs, 4000),
         }
+        if has_code_map:
+            inspect_line = (
+                "A CODE_MAP.md at the project root describes file roles, kernel structure, "
+                "tiling, buffers, and contracts. Read it first instead of grepping the whole project. "
+                "After editing code, update the affected sections of CODE_MAP.md to keep it accurate.\n"
+            )
+        else:
+            inspect_line = "First inspect the project with Glob, Grep, and Read. Then edit only necessary files.\n"
         prompt = (
             "You are an AscendC performance optimization agent working inside a candidate project directory.\n"
             "IMPORTANT: You must ONLY edit files inside the current project directory (CWD). Do NOT use absolute paths from any external directories.\n"
@@ -113,8 +121,8 @@ class AscendCAgenticPromptBuilder:
             f"Round: {int(request.round_num)}\n"
             f"Attempt: {int(request.attempt_idx)}\n\n"
             "Available tools: Read/Grep/Glob/Edit/Write. Bash is disabled.\n"
-            "First inspect the project with Glob, Grep, and Read. Then edit only necessary files.\n"
-            "Do not read or modify .git, build directories, caches, generated logs, or large artifacts.\n"
+            + inspect_line
+            + "Do not read or modify .git, build directories, caches, generated logs, or large artifacts.\n"
             "Preserve operator semantics, public entry points, host tiling contract, correctness harness behavior, and build layout.\n"
             "Do not return a full source container. Modify files in the project directory.\n"
             "End with a concise summary and changed-file list.\n\n"
