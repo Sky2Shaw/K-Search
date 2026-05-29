@@ -67,3 +67,20 @@ def test_code_reader_agent_explicitly_disallows_edit():
     agent = CodeReaderAgent(model_name="claude", editor_client=FakeClient())
     assert "Edit" in agent.disallowed_tools
     assert "Bash" in agent.disallowed_tools
+
+
+def test_codegen_agent_delegates_to_prompt_builder():
+    from k_search.kernel_generators.agents import CodegenAgent
+    from k_search.kernel_generators.ascendc_agentic_codegen import AscendCAgenticCodegenRequest
+
+    agent = CodegenAgent(model_name="claude", editor_client=FakeClient())
+    assert agent.allowed_tools == ["Read", "Grep", "Glob", "Edit", "Write"]
+
+    request = AscendCAgenticCodegenRequest(
+        definition_text="Task: x", action_text="opt", trace_logs="", perf_summary="",
+        target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action",
+    )
+    prompt_no_map = agent.build_prompt({"request": request, "has_code_map": False})
+    prompt_map = agent.build_prompt({"request": request, "has_code_map": True})
+    assert "First inspect the project" in prompt_no_map
+    assert "CODE_MAP.md" in prompt_map
