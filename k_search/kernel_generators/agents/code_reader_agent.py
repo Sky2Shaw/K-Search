@@ -59,6 +59,7 @@ class CodeReaderAgent(ProjectAgent):
     """Read-only role that produces the code_map memory (CODE_MAP.md)."""
 
     allowed_tools = ["Read", "Grep", "Glob", "Write"]
+    disallowed_tools = ["Bash", "Edit"]
 
     def __init__(self, *, model_name: str, editor_client: Any | None = None, max_chars: int | None = None) -> None:
         super().__init__(model_name=model_name, editor_client=editor_client)

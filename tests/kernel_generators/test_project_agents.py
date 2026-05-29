@@ -59,3 +59,11 @@ def test_code_reader_agent_tools_and_prompt(tmp_path):
     assert "Vector add operator." in prompt
     assert "1234" in prompt  # max_chars injected
     assert "# CODE_MAP" in prompt  # template anchor
+
+
+def test_code_reader_agent_explicitly_disallows_edit():
+    from k_search.kernel_generators.agents import CodeReaderAgent
+
+    agent = CodeReaderAgent(model_name="claude", editor_client=FakeClient())
+    assert "Edit" in agent.disallowed_tools
+    assert "Bash" in agent.disallowed_tools
