@@ -202,7 +202,8 @@ def test_runner_fails_when_agent_makes_no_file_changes(tmp_path):
         )
 
 
-def test_runner_overlays_base_solution_before_editing(tmp_path):
+def test_runner_overlays_base_solution_before_editing(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "0")
     task_dir = tmp_path / "task"
     task_dir.mkdir()
     (task_dir / "kernel").mkdir()
@@ -441,3 +442,109 @@ def test_prompt_builder_uses_code_map_branch_when_present():
     assert "update the affected sections" in with_map
     assert "CODE_MAP.md" not in without_map
     assert "First inspect the project with Glob, Grep, and Read" in without_map
+
+
+def test_runner_generates_and_persists_code_map_on_first_round(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
+
+    class ReaderClient:
+        def __init__(self):
+            self.prompts = []
+
+        def edit_project(self, *, project_dir, prompt, telemetry_recorder=None):
+            self.prompts.append(prompt)
+            root = Path(project_dir)
+            if "CODE_MAP.md using EXACTLY" in prompt:
+                (root / "CODE_MAP.md").write_text("# CODE_MAP\nfoo.h is the kernel\n", encoding="utf-8")
+                text = "wrote CODE_MAP.md"
+            else:
+                (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+                text = "edited"
+            return ClaudeProjectEditResult(
+                text=text, transcript=text, prompt=prompt,
+                prompt_chars=len(prompt), prompt_lines=prompt.count("\n") + 1,
+            )
+
+    client = ReaderClient()
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=client)
+    result = runner.run(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+            target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action",
+        ),
+        base_solution=None,
+    )
+
+    assert any("CODE_MAP.md using EXACTLY" in p for p in client.prompts)
+    assert any("Read it first instead of grepping" in p for p in client.prompts)
+    from k_search.kernel_generators.memory import CODE_MAP, MemoryStore
+    store = MemoryStore.for_task(task)
+    assert store.load(CODE_MAP) is not None
+    assert result.code_map_text is not None
+    assert "CODE_MAP.md" not in result.changed_paths
+    assert "kernel/foo.h" in result.changed_paths
+
+
+def test_runner_reuses_existing_code_map_without_reader(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
+    from k_search.kernel_generators.memory import CODE_MAP, MemoryStore
+    MemoryStore.for_task(task).save(CODE_MAP, "# CODE_MAP\npreseeded\n")
+
+    class CodegenOnlyClient:
+        def __init__(self):
+            self.prompts = []
+
+        def edit_project(self, *, project_dir, prompt, telemetry_recorder=None):
+            self.prompts.append(prompt)
+            assert "CODE_MAP.md using EXACTLY" not in prompt
+            root = Path(project_dir)
+            assert (root / "CODE_MAP.md").read_text(encoding="utf-8") == "# CODE_MAP\npreseeded\n"
+            (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+            return ClaudeProjectEditResult(
+                text="edited", transcript="edited", prompt=prompt,
+                prompt_chars=len(prompt), prompt_lines=prompt.count("\n") + 1,
+            )
+
+    client = CodegenOnlyClient()
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=client)
+    result = runner.run(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+            target_gpu="ascend_910b", round_num=2, attempt_idx=1, mode="improve",
+        ),
+        base_solution=None,
+    )
+    assert len(client.prompts) == 1
+    assert "Read it first instead of grepping" in client.prompts[0]
+    assert "CODE_MAP.md" not in result.changed_paths
+
+
+def test_runner_code_map_disabled_keeps_legacy_behavior(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "0")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
+    client = EditingClient("alpha\nBETA\ngamma\n")
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=client)
+    result = runner.run(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+            target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action",
+        ),
+        base_solution=None,
+    )
+    assert "First inspect the project" in client.calls[0][1]
+    assert "CODE_MAP.md" not in client.calls[0][1]
+    assert result.code_map_text is None

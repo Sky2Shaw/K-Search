@@ -78,6 +78,7 @@ def test_claude_project_editor_client_uses_sdk_client_with_cwd_and_file_tools(mo
 def test_claude_agent_sdk_mock_drives_agentic_ascendc_two_round_optimization(
     monkeypatch, tmp_path
 ):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "0")
     from pathlib import Path
 
     kernel_dir = tmp_path / "kernel"

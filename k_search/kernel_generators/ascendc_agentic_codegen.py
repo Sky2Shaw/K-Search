@@ -8,6 +8,7 @@ from typing import Any, Literal
 from k_search.kernel_generators.agentic_candidate_artifacts import write_agentic_candidate_artifacts
 from k_search.kernel_generators.agentic_worktree import create_agentic_worktree
 from k_search.kernel_generators.candidate_patch import CandidatePatch
+from k_search.kernel_generators.memory import CODE_MAP, MemoryStore
 from k_search.kernel_generators.claude_agent_project_editor import (
     ClaudeAgentProjectEditorClient,
     ClaudeProjectEditResult,
@@ -63,6 +64,7 @@ class AscendCAgenticCodegenResult:
     model_usage: dict[str, Any] | None = None
     num_turns: int | None = None
     duration_ms: int | None = None
+    code_map_text: str | None = None
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -171,7 +173,36 @@ class AscendCAgenticCodegenRunner:
                 overlay(project_dir=session.project_dir, solution=base_solution)
                 session.commit_all("ksearch agentic overlay baseline")
 
-            prompt = self.prompt_builder.build(request)
+            code_map_enabled = os.getenv("KSEARCH_ENABLE_CODE_MAP", "1").strip().lower() not in {
+                "0",
+                "false",
+                "no",
+                "off",
+            }
+            store = MemoryStore.for_task(task) if code_map_enabled else None
+            has_code_map = False
+            if store is not None:
+                from k_search.kernel_generators.agents import CodeReaderAgent
+
+                if store.load(CODE_MAP) is None:
+                    try:
+                        reader = CodeReaderAgent(
+                            model_name=self.model_name, editor_client=self.editor_client
+                        )
+                        reader.run(
+                            project_dir=session.project_dir,
+                            context={"definition_text": request.definition_text},
+                        )
+                        produced = store.read_from_worktree(CODE_MAP, session.project_dir)
+                        if produced:
+                            store.save(CODE_MAP, produced)
+                    except Exception as exc:  # noqa: BLE001 - code map is best-effort
+                        import warnings
+
+                        warnings.warn(f"code_map reader failed, continuing without it: {exc}")
+                has_code_map = store.materialize(CODE_MAP, session.project_dir)
+
+            prompt = self.prompt_builder.build(request, has_code_map=has_code_map)
             telemetry_context = TelemetryContext(
                 task_name=getattr(task, "definition_name", None),
                 definition=getattr(task, "definition_name", None),
@@ -196,6 +227,7 @@ class AscendCAgenticCodegenRunner:
                 telemetry_recorder.close()
             project_changed_paths = session.project_changed_paths()
             changed_paths = project_changed_paths or session.changed_paths()
+            changed_paths = [p for p in changed_paths if p != CODE_MAP.filename]
             if not changed_paths:
                 raise RuntimeError(
                     "Claude agentic AscendC codegen did not change any files "
@@ -256,6 +288,9 @@ class AscendCAgenticCodegenRunner:
                     "evaluator_mutated_project": evaluator_mutated_project,
                 },
             )
+            code_map_text = (
+                store.read_from_worktree(CODE_MAP, session.project_dir) if store is not None else None
+            )
             return AscendCAgenticCodegenResult(
                 solution=solution,
                 eval_result=eval_result,
@@ -281,6 +316,7 @@ class AscendCAgenticCodegenRunner:
                 model_usage=edit_result.model_usage,
                 num_turns=edit_result.num_turns,
                 duration_ms=edit_result.duration_ms,
+                code_map_text=code_map_text,
             )
         finally:
             session.cleanup()
